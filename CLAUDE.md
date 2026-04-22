@@ -19,11 +19,27 @@ python telegram_claude_poc.py
 pytest tests/
 ```
 
+## Configuration
+
+**Environment variables (required):**
+```bash
+export TELEGRAM_BOT_TOKEN="your_bot_token_here"
+export CLAUDE_CODE_PROJECT_PATH="/path/to/your/codebase"
+```
+
+Or create `config.yaml` (copy from `config.yaml.example`):
+```yaml
+telegram_bot_token: "your_bot_token_here"
+claude_code_project_path: "/path/to/your/codebase"
+poll_interval_seconds: 5
+task_timeout_minutes: 30
+```
+
 ## Architecture
 
 - `telegram_claude_poc.py` - Main entry point (poller + Claude Code wrapper + queue + stream handler)
-- `config.yaml` - Configuration (Telegram token, project path, timeouts)
-- `tasks.json` - Persisted task queue state
+- `config.yaml.example` - Configuration template
+- `tasks.json` - Persisted task queue state (gitignored)
 
 ## Key Design Decisions
 

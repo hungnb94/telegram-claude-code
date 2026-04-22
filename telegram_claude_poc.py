@@ -21,7 +21,6 @@ from telegram import Bot, TelegramError, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, PollAnswerHandler, PollHandler
 
 SCRIPT_DIR = Path(__file__).parent
-CONFIG_FILE = SCRIPT_DIR / "config.yaml"
 TASKS_FILE = SCRIPT_DIR / "tasks.json"
 CHUNK_SIZE = 30
 STREAMING_MESSAGE_ID_KEY = "streaming_message_id"
@@ -306,11 +305,25 @@ def asyncio_run(coro):
 
 
 def load_config() -> dict:
-    if not CONFIG_FILE.exists():
-        print(f"Config file not found: {CONFIG_FILE}", file=sys.stderr)
+    config_file = SCRIPT_DIR / "config.yaml"
+    if config_file.exists():
+        with open(config_file) as f:
+            config = yaml.safe_load(f)
+    else:
+        config = {}
+    config["telegram_bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN", config.get("telegram_bot_token", ""))
+    config["claude_code_project_path"] = os.environ.get("CLAUDE_CODE_PROJECT_PATH", config.get("claude_code_project_path", ""))
+    config["poll_interval_seconds"] = int(os.environ.get("POLL_INTERVAL_SECONDS", config.get("poll_interval_seconds", 5)))
+    config["task_timeout_minutes"] = int(os.environ.get("TASK_TIMEOUT_MINUTES", config.get("task_timeout_minutes", 30)))
+
+    if not config["telegram_bot_token"]:
+        print("TELEGRAM_BOT_TOKEN environment variable or config.yaml required", file=sys.stderr)
         sys.exit(1)
-    with open(CONFIG_FILE) as f:
-        return yaml.safe_load(f)
+    if not config["claude_code_project_path"]:
+        print("CLAUDE_CODE_PROJECT_PATH environment variable or config.yaml required", file=sys.stderr)
+        sys.exit(1)
+
+    return config
 
 
 def main():
