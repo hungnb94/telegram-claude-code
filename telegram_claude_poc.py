@@ -5,6 +5,7 @@ Telegram → Claude Code POC
 User sends message via Telegram → Claude Code CLI runs locally → streams progress back to Telegram.
 """
 
+import asyncio
 import json
 import os
 import signal
@@ -17,13 +18,12 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from telegram import Bot, TelegramError, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, PollAnswerHandler, PollHandler
+from telegram import Bot, Update
+from telegram.error import TelegramError
 
 SCRIPT_DIR = Path(__file__).parent
 TASKS_FILE = SCRIPT_DIR / "tasks.json"
 CHUNK_SIZE = 30
-STREAMING_MESSAGE_ID_KEY = "streaming_message_id"
 
 
 class TaskQueue:
@@ -159,10 +159,11 @@ class TelegramClaudeBot:
         self.poll_interval = config.get("poll_interval_seconds", 5)
         self.timeout_minutes = config.get("task_timeout_minutes", 30)
         self.queue = TaskQueue(TASKS_FILE)
-        self.stream_handler = StreamHandler()
-        self.worker_thread: Optional[threading.Thread] = None
         self.running = True
         self.streaming_message: dict = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._executor: Optional[threading.Thread] = None
+        self._offset: Optional[int] = None
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None):
         try:
@@ -184,12 +185,12 @@ class TelegramClaudeBot:
         except TelegramError:
             pass
 
-    async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_start(self, update: Update):
         await update.message.reply_text(
             "Claude Code Telegram Bot\n\nSend me a task description and I'll execute it using Claude Code on your local codebase.\n\nTasks are queued if a task is already running."
         )
 
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_message(self, update: Update):
         if update.message and update.message.text:
             text = update.message.text.strip()
             chat_id = str(update.message.chat_id)
@@ -204,32 +205,23 @@ class TelegramClaudeBot:
                 self._start_worker()
 
     def _start_worker(self):
-        if self.worker_thread and self.worker_thread.is_alive():
+        if self._executor and self._executor.is_alive():
             return
-        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
-        self.worker_thread.start()
+        self._executor = threading.Thread(target=self._worker_loop, daemon=True)
+        self._executor.start()
 
     def _worker_loop(self):
         while self.running:
-            task = self.queue.peek()
-            if not task:
-                break
-
             task = self.queue.dequeue()
             if not task:
                 break
-
             asyncio_run(self._execute_task(task))
-
-            if self.queue.peek():
-                continue
-            break
 
     async def _execute_task(self, task: dict):
         chat_id = task["chat_id"]
         message_id = task["message_id"]
         text = task["text"]
-        self.stream_handler = StreamHandler()
+        stream_handler = StreamHandler()
 
         try:
             streaming_msg = await self.bot.send_message(
@@ -240,11 +232,12 @@ class TelegramClaudeBot:
             self.streaming_message[message_id] = str(streaming_msg.message_id)
         except TelegramError as e:
             print(f"Failed to create streaming message: {e}", file=sys.stderr)
+            return
 
         def output_callback(line: str):
-            chunks = self.stream_handler.add_line(line)
+            chunks = stream_handler.add_line(line)
             for chunk in chunks:
-                asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(self.stream_handler.buffer)))
+                asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(stream_handler.buffer)))
 
         def error_callback(line: str):
             asyncio_run(self.send_text(chat_id, f"❌ {line}"))
@@ -252,56 +245,71 @@ class TelegramClaudeBot:
         claude = ClaudeSubprocess(self.project_path, self.timeout_minutes)
         success = claude.run(text, output_callback, error_callback)
 
-        remaining = self.stream_handler.flush()
+        remaining = stream_handler.flush()
         if remaining:
-            asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(self.stream_handler.buffer)))
+            asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(stream_handler.buffer)))
 
         self.queue.complete(message_id, success)
 
         if success:
-            asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), f"✅ Task completed"))
+            asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "✅ Task completed"))
         else:
-            asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), f"❌ Task failed"))
+            asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "❌ Task failed"))
 
         self.streaming_message.pop(message_id, None)
 
-    def start(self):
-        self._setup_signal_handlers()
+    async def poll_loop(self):
         while self.running:
             try:
-                updates = self.bot.get_updates(timeout=self.poll_interval)
-                for update in updates:
-                    if update.message:
-                        if update.message.text == "/start":
-                            asyncio_run(self.handle_start(update, None))
-                        elif update.message.text.startswith("/"):
-                            pass
-                        else:
-                            asyncio_run(self.handle_message(update, None))
-                time.sleep(self.poll_interval)
+                updates = await self.bot.get_updates(timeout=self.poll_interval, offset=self._offset)
+                if updates:
+                    for update in updates:
+                        if update.message:
+                            if update.message.text == "/start":
+                                await self.handle_start(update)
+                            elif update.message.text.startswith("/"):
+                                pass
+                            else:
+                                await self.handle_message(update)
+                        self._offset = update.update_id + 1
+                await asyncio.sleep(self.poll_interval)
             except TelegramError as e:
                 print(f"Poll error: {e}", file=sys.stderr)
-                time.sleep(10)
+                await asyncio.sleep(10)
             except Exception as e:
                 print(f"Unexpected error: {e}", file=sys.stderr)
-                time.sleep(5)
+                await asyncio.sleep(5)
 
-    def _setup_signal_handlers(self):
-        signal.signal(signal.SIGINT, lambda s, f: self._shutdown())
-        signal.signal(signal.SIGTERM, lambda s, f: self._shutdown())
+    def start(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._setup_signal_handlers())
+        try:
+            self._loop.run_until_complete(self.poll_loop())
+        finally:
+            self._loop.close()
+
+    async def _setup_signal_handlers(self):
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, self._shutdown)
 
     def _shutdown(self):
         self.running = False
 
 
+_global_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
 def asyncio_run(coro):
-    import asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    global _global_loop
+    if _global_loop is None or _global_loop.is_closed():
+        _global_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_global_loop)
     try:
-        loop.run_until_complete(coro)
+        _global_loop.run_until_complete(coro)
     finally:
-        loop.close()
+        pass
 
 
 def load_config() -> dict:

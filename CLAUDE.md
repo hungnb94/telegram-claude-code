@@ -10,7 +10,9 @@ POC: Telegram user sends message → Claude Code CLI runs locally → streams pr
 
 ```bash
 # Setup
-pip install python-telegram-bot pyyaml
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
 # Run the bot
 python telegram_claude_poc.py
