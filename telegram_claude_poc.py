@@ -104,7 +104,7 @@ class ClaudeSubprocess:
         )
 
         try:
-            self.process.stdin.write(task_description)
+            self.process.stdin.write(f"Your task: {task_description}\n")
             self.process.stdin.close()
             for line in iter(self.process.stdout.readline, ""):
                 if not line:
