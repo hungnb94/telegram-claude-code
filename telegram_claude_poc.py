@@ -11,7 +11,6 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +28,6 @@ CHUNK_SIZE = 30
 class TaskQueue:
     def __init__(self, tasks_file: Path):
         self.tasks_file = tasks_file
-        self.lock = threading.Lock()
         self._ensure_file()
 
     def _ensure_file(self):
@@ -48,51 +46,45 @@ class TaskQueue:
             json.dump(data, f, indent=2)
 
     def enqueue(self, task: dict) -> str:
-        with self.lock:
-            data = self._load()
-            data["pending"].append(task)
-            self._save(data)
-            return task["message_id"]
+        data = self._load()
+        data["pending"].append(task)
+        self._save(data)
+        return task["message_id"]
 
     def peek(self) -> Optional[dict]:
-        with self.lock:
-            data = self._load()
-            if data["pending"]:
-                return data["pending"][0]
-            return None
+        data = self._load()
+        if data["pending"]:
+            return data["pending"][0]
+        return None
 
     def dequeue(self) -> Optional[dict]:
-        with self.lock:
-            data = self._load()
-            if not data["pending"]:
-                return None
-            task = data["pending"].pop(0)
-            data["running"] = task
-            self._save(data)
-            return task
+        data = self._load()
+        if not data["pending"]:
+            return None
+        task = data["pending"].pop(0)
+        data["running"] = task
+        self._save(data)
+        return task
 
     def set_running(self, task: dict):
-        with self.lock:
-            data = self._load()
-            data["running"] = task
-            data["pending"] = [t for t in data["pending"] if t["message_id"] != task["message_id"]]
-            self._save(data)
+        data = self._load()
+        data["running"] = task
+        data["pending"] = [t for t in data["pending"] if t["message_id"] != task["message_id"]]
+        self._save(data)
 
     def complete(self, message_id: str, success: bool = True):
-        with self.lock:
-            data = self._load()
-            if data["running"] and data["running"]["message_id"] == message_id:
-                data["completed"].append({**data["running"], "success": success, "completed_at": datetime.now().isoformat()})
-                data["running"] = None
+        data = self._load()
+        if data["running"] and data["running"]["message_id"] == message_id:
+            data["completed"].append({**data["running"], "success": success, "completed_at": datetime.now().isoformat()})
+            data["running"] = None
             self._save(data)
 
     def mark_failed(self, message_id: str):
         self.complete(message_id, success=False)
 
     def has_running_task(self) -> bool:
-        with self.lock:
-            data = self._load()
-            return data["running"] is not None
+        data = self._load()
+        return data["running"] is not None
 
 
 class ClaudeSubprocess:
@@ -161,9 +153,8 @@ class TelegramClaudeBot:
         self.queue = TaskQueue(TASKS_FILE)
         self.running = True
         self.streaming_message: dict = {}
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._executor: Optional[threading.Thread] = None
         self._offset: Optional[int] = None
+        self._task_lock = asyncio.Lock()
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None):
         try:
@@ -202,62 +193,44 @@ class TelegramClaudeBot:
             else:
                 self.queue.set_running({"message_id": message_id, "text": text, "chat_id": chat_id})
                 await update.message.reply_text("Starting task...")
-                self._start_worker()
+                asyncio.create_task(self._execute_task(message_id, chat_id, text))
 
-    def _start_worker(self):
-        if self._executor and self._executor.is_alive():
-            return
-        self._executor = threading.Thread(target=self._worker_loop, daemon=True)
-        self._executor.start()
+    async def _execute_task(self, message_id: str, chat_id: str, text: str):
+        async with self._task_lock:
+            stream_handler = StreamHandler()
 
-    def _worker_loop(self):
-        while self.running:
-            task = self.queue.dequeue()
-            if task:
-                asyncio_run(self._execute_task(task))
-            else:
-                time.sleep(0.5)
+            try:
+                streaming_msg = await self.bot.send_message(
+                    text="⏳ Running...",
+                    chat_id=chat_id,
+                    reply_to_message_id=int(message_id),
+                )
+                self.streaming_message[message_id] = str(streaming_msg.message_id)
+            except TelegramError as e:
+                print(f"Failed to create streaming message: {e}", file=sys.stderr)
+                self.queue.complete(message_id, False)
+                return
 
-    async def _execute_task(self, task: dict):
-        chat_id = task["chat_id"]
-        message_id = task["message_id"]
-        text = task["text"]
-        stream_handler = StreamHandler()
+            def output_callback(line: str):
+                chunks = stream_handler.add_line(line)
+                for chunk in chunks:
+                    asyncio.create_task(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(stream_handler.buffer)))
 
-        try:
-            streaming_msg = await self.bot.send_message(
-                text="⏳ Running...",
-                chat_id=chat_id,
-                reply_to_message_id=int(message_id),
-            )
-            self.streaming_message[message_id] = str(streaming_msg.message_id)
-        except TelegramError as e:
-            print(f"Failed to create streaming message: {e}", file=sys.stderr)
-            return
+            def error_callback(line: str):
+                asyncio.create_task(self.send_text(chat_id, f"❌ {line}"))
 
-        def output_callback(line: str):
-            chunks = stream_handler.add_line(line)
-            for chunk in chunks:
-                asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(stream_handler.buffer)))
+            claude = ClaudeSubprocess(self.project_path, self.timeout_minutes)
+            success = claude.run(text, output_callback, error_callback)
 
-        def error_callback(line: str):
-            asyncio_run(self.send_text(chat_id, f"❌ {line}"))
+            remaining = stream_handler.flush()
+            if remaining:
+                asyncio.create_task(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(stream_handler.buffer)))
 
-        claude = ClaudeSubprocess(self.project_path, self.timeout_minutes)
-        success = claude.run(text, output_callback, error_callback)
+            self.queue.complete(message_id, success)
 
-        remaining = stream_handler.flush()
-        if remaining:
-            asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(stream_handler.buffer)))
-
-        self.queue.complete(message_id, success)
-
-        if success:
-            asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "✅ Task completed"))
-        else:
-            asyncio_run(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "❌ Task failed"))
-
-        self.streaming_message.pop(message_id, None)
+            final_text = "✅ Task completed" if success else "❌ Task failed"
+            asyncio.create_task(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), final_text))
+            self.streaming_message.pop(message_id, None)
 
     async def poll_loop(self):
         while self.running:
@@ -281,60 +254,19 @@ class TelegramClaudeBot:
                 print(f"Unexpected error: {e}", file=sys.stderr)
                 await asyncio.sleep(5)
 
-    def start(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._setup_signal_handlers())
-        try:
-            self._loop.run_until_complete(self.poll_loop())
-        finally:
-            self._loop.close()
-
     async def _setup_signal_handlers(self):
-        loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._shutdown)
+            asyncio.get_event_loop().add_signal_handler(sig, self._shutdown)
 
     def _shutdown(self):
         self.running = False
 
+    def start(self):
+        asyncio.run(self._async_main())
 
-_global_loop: Optional[asyncio.AbstractEventLoop] = None
-
-
-def asyncio_run(coro):
-    global _global_loop
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        evt = threading.Event()
-        result = [None]
-        exc = [None]
-
-        def done(f):
-            try:
-                result[0] = f.result()
-            except Exception as e:
-                exc[0] = e
-            finally:
-                evt.set()
-
-        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(coro).add_done_callback(done))
-        evt.wait(timeout=30)
-        if exc[0]:
-            raise exc[0]
-        return result[0]
-
-    if _global_loop is None or _global_loop.is_closed():
-        _global_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_global_loop)
-    try:
-        _global_loop.run_until_complete(coro)
-    finally:
-        pass
+    async def _async_main(self):
+        await self._setup_signal_handlers()
+        await self.poll_loop()
 
 
 def load_config() -> dict:
