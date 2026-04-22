@@ -213,9 +213,10 @@ class TelegramClaudeBot:
     def _worker_loop(self):
         while self.running:
             task = self.queue.dequeue()
-            if not task:
-                break
-            asyncio_run(self._execute_task(task))
+            if task:
+                asyncio_run(self._execute_task(task))
+            else:
+                time.sleep(0.5)
 
     async def _execute_task(self, task: dict):
         chat_id = task["chat_id"]
@@ -303,6 +304,30 @@ _global_loop: Optional[asyncio.AbstractEventLoop] = None
 
 def asyncio_run(coro):
     global _global_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        evt = threading.Event()
+        result = [None]
+        exc = [None]
+
+        def done(f):
+            try:
+                result[0] = f.result()
+            except Exception as e:
+                exc[0] = e
+            finally:
+                evt.set()
+
+        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(coro).add_done_callback(done))
+        evt.wait(timeout=30)
+        if exc[0]:
+            raise exc[0]
+        return result[0]
+
     if _global_loop is None or _global_loop.is_closed():
         _global_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_global_loop)
