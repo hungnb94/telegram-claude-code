@@ -95,14 +95,17 @@ class ClaudeSubprocess:
 
     def run(self, task_description: str, output_callback, error_callback) -> bool:
         self.process = subprocess.Popen(
-            ["claude", "code", "--dangerously-skip-permissions", f"Your task: {task_description}"],
+            ["claude", "code", "--print", "--dangerously-skip-permissions", "--no-session-persistence"],
             cwd=self.project_path,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
 
         try:
+            self.process.stdin.write(task_description)
+            self.process.stdin.close()
             for line in iter(self.process.stdout.readline, ""):
                 if not line:
                     break
