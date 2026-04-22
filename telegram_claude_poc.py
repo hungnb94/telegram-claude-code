@@ -101,19 +101,25 @@ class ClaudeSubprocess:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            bufsize=1,
         )
 
         try:
             self.process.stdin.write(f"Your task: {task_description}\n")
+            self.process.stdin.flush()
             self.process.stdin.close()
-            for line in iter(self.process.stdout.readline, ""):
-                if not line:
-                    break
-                output_callback(line.rstrip())
+            output = self.process.stdout.read()
+            for line in output.splitlines():
+                if line:
+                    output_callback(line)
             self.process.wait(timeout=self.timeout_seconds)
             return self.process.returncode == 0
         except subprocess.TimeoutExpired:
             error_callback("Task timed out")
+            self.kill()
+            return False
+        except Exception as e:
+            error_callback(f"Error: {e}")
             self.kill()
             return False
         finally:
@@ -227,7 +233,7 @@ class TelegramClaudeBot:
 
             remaining = stream_handler.flush()
             if remaining:
-                asyncio.create_task(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(stream_handler.buffer)))
+                asyncio.create_task(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(remaining)))
 
             self.queue.complete(message_id, success)
 
