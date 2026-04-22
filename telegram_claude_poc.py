@@ -95,7 +95,7 @@ class ClaudeSubprocess:
 
     def run(self, task_description: str, output_callback, error_callback) -> bool:
         self.process = subprocess.Popen(
-            ["claude", "code", "--print", "--dangerously-skip-permissions", "--no-session-persistence"],
+            ["claude", "--print", "--dangerously-skip-permissions", "--no-session-persistence"],
             cwd=self.project_path,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
