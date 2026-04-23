@@ -845,7 +845,7 @@ class Bot:
                             elif update.message.text.startswith("/"):
                                 pass
                             else:
-                                await update.message
+                                await self.handle_message(update)
                         self._offset = update.update_id + 1
                 await asyncio.sleep(self.poll_interval)
             except TelegramError as e:
