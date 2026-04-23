@@ -12,28 +12,28 @@ kaizen:
   scan_interval_hours: 6
   categories:
     reliability:
-      max_results: 2
+      min_results: 2
       signals:
         - high_failure_rate
         - task_timeout
         - queue_stall
     performance:
-      max_results: 2
+      min_results: 2
       signals:
         - queue_backlog
         - slow_tasks
     maintainability:
-      max_results: 2
+      min_results: 2
       signals:
         - code_complexity
         - large_file
     code_quality:
-      max_results: 2
+      min_results: 2
       signals:
         - missing_tests
         - missing_types
     feature_requests:
-      max_results: 2
+      min_results: 2
       signals:
         - requested_feature
         - repeated_pattern

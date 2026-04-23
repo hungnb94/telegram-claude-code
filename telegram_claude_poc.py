@@ -41,23 +41,23 @@ class KaizenConfig:
     """Default kaizen configuration."""
     DEFAULT_CATEGORIES = {
         "reliability": {
-            "max_results": 2,
+            "min_results": 2,
             "signals": ["high_failure_rate", "task_timeout", "queue_stall"],
         },
         "performance": {
-            "max_results": 2,
+            "min_results": 2,
             "signals": ["queue_backlog", "slow_tasks"],
         },
         "maintainability": {
-            "max_results": 2,
+            "min_results": 2,
             "signals": ["code_complexity", "large_file"],
         },
         "code_quality": {
-            "max_results": 2,
+            "min_results": 2,
             "signals": ["missing_tests", "missing_types"],
         },
         "feature_requests": {
-            "max_results": 2,
+            "min_results": 2,
             "signals": ["requested_feature", "repeated_pattern"],
         },
     }
@@ -96,7 +96,7 @@ class KaizenScanner:
                 r["id"] = signal_id
             recommendations.extend(results)
 
-        # Group by category, apply max_results per category
+        # Group by category, apply min_results per category
         by_category: dict[str, list[dict]] = {}
         for rec in recommendations:
             cat = rec.get("category", "uncategorized")
@@ -104,8 +104,8 @@ class KaizenScanner:
 
         capped: list[dict] = []
         for cat, cat_recs in by_category.items():
-            max_results = self.config.categories.get(cat, {}).get("max_results", 2)
-            capped.extend(cat_recs[:max_results])
+            min_results = self.config.categories.get(cat, {}).get("min_results", 2)
+            capped.extend(cat_recs[:min_results])
 
         # Sort by priority (High > Medium > Low)
         priority_order = {"high": 0, "medium": 1, "low": 2}

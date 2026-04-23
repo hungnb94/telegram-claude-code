@@ -7,7 +7,7 @@ KaizenScanner analyzes task history and codebase to generate ranked improvement 
 ## Categories
 
 Each category has:
-- `max_results` — maximum recommendations to return for this category
+- `min_results` — minimum recommendations to return for this category
 - `signals` — list of signal IDs this category listens to
 
 ### Signal Registry
@@ -36,28 +36,28 @@ kaizen:
   scan_interval_hours: 6
   categories:
     reliability:
-      max_results: 2
+      min_results: 2
       signals:
         - high_failure_rate
         - task_timeout
         - queue_stall
     performance:
-      max_results: 2
+      min_results: 2
       signals:
         - queue_backlog
         - slow_tasks
     maintainability:
-      max_results: 2
+      min_results: 2
       signals:
         - code_complexity
         - large_file
     code_quality:
-      max_results: 2
+      min_results: 2
       signals:
         - missing_tests
         - missing_types
     feature_requests:
-      max_results: 2
+      min_results: 2
       signals:
         - requested_feature
         - repeated_pattern
@@ -75,7 +75,7 @@ kaizen:
 scan()
   → runs all registered analyzers
   → each recommendation tagged with category
-  → group by category, apply max_results cap
+  → group by category, apply min_results cap
   → merge all categories, sort by priority/impact
   → save to kaizen_recommendations.json
   → return sorted list
