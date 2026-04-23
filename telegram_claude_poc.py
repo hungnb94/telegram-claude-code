@@ -9,7 +9,6 @@ import asyncio
 import json
 import os
 import signal
-import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +17,10 @@ from typing import Optional
 import yaml
 from telegram import Bot, Update
 from telegram.error import TelegramError
+
+from task_queue import TaskQueue
+from claude_subprocess import ClaudeSubprocess
+from stream_handler import StreamHandler
 
 SCRIPT_DIR = Path(__file__).parent
 TASKS_FILE = SCRIPT_DIR / "tasks.json"
@@ -399,134 +402,6 @@ class KaizenScanner:
             return data.get("recommendations", [])
         except (json.JSONDecodeError, FileNotFoundError):
             return None
-
-
-class TaskQueue:
-    def __init__(self, tasks_file: Path):
-        self.tasks_file = tasks_file
-        self._ensure_file()
-
-    def _ensure_file(self):
-        if not self.tasks_file.exists():
-            self._save({"pending": [], "running": None, "completed": []})
-
-    def _load(self) -> dict:
-        try:
-            with open(self.tasks_file) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            return {"pending": [], "running": None, "completed": []}
-
-    def _save(self, data: dict):
-        with open(self.tasks_file, "w") as f:
-            json.dump(data, f, indent=2)
-
-    def enqueue(self, task: dict) -> str:
-        data = self._load()
-        data["pending"].append(task)
-        self._save(data)
-        return task["message_id"]
-
-    def peek(self) -> Optional[dict]:
-        data = self._load()
-        if data["pending"]:
-            return data["pending"][0]
-        return None
-
-    def dequeue(self) -> Optional[dict]:
-        data = self._load()
-        if not data["pending"]:
-            return None
-        task = data["pending"].pop(0)
-        data["running"] = task
-        self._save(data)
-        return task
-
-    def set_running(self, task: dict):
-        data = self._load()
-        data["running"] = task
-        data["pending"] = [t for t in data["pending"] if t["message_id"] != task["message_id"]]
-        self._save(data)
-
-    def complete(self, message_id: str, success: bool = True):
-        data = self._load()
-        if data["running"] and data["running"]["message_id"] == message_id:
-            data["completed"].append({**data["running"], "success": success, "completed_at": datetime.now().isoformat()})
-            data["running"] = None
-            self._save(data)
-
-    def mark_failed(self, message_id: str):
-        self.complete(message_id, success=False)
-
-    def has_running_task(self) -> bool:
-        data = self._load()
-        return data["running"] is not None
-
-
-class ClaudeSubprocess:
-    def __init__(self, project_path: str, timeout_minutes: int = 30):
-        self.project_path = project_path
-        self.timeout_seconds = timeout_minutes * 60
-        self.process: Optional[subprocess.Popen] = None
-
-    def run(self, task_description: str, output_callback, error_callback) -> bool:
-        self.process = subprocess.Popen(
-            ["claude", "--print", "--dangerously-skip-permissions", "--no-session-persistence"],
-            cwd=self.project_path,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-
-        try:
-            self.process.stdin.write(f"Your task: {task_description}\n")
-            self.process.stdin.flush()
-            self.process.stdin.close()
-            output = self.process.stdout.read()
-            for line in output.splitlines():
-                if line:
-                    output_callback(line)
-            self.process.wait(timeout=self.timeout_seconds)
-            return self.process.returncode == 0
-        except subprocess.TimeoutExpired:
-            error_callback("Task timed out")
-            self.kill()
-            return False
-        except Exception as e:
-            error_callback(f"Error: {e}")
-            self.kill()
-            return False
-        finally:
-            self.process = None
-
-    def kill(self):
-        if self.process:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-
-
-class StreamHandler:
-    def __init__(self, lines_per_chunk: int = CHUNK_SIZE):
-        self.lines_per_chunk = lines_per_chunk
-        self.buffer: list[str] = []
-
-    def add_line(self, line: str) -> list[str]:
-        self.buffer.append(line)
-        if len(self.buffer) >= self.lines_per_chunk:
-            result = self.buffer
-            self.buffer = []
-            return result
-        return []
-
-    def flush(self) -> list[str]:
-        result = self.buffer
-        self.buffer = []
-        return result
 
 
 class TelegramClaudeBot:
