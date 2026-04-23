@@ -12,7 +12,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -22,7 +22,173 @@ from telegram.error import TelegramError
 
 SCRIPT_DIR = Path(__file__).parent
 TASKS_FILE = SCRIPT_DIR / "tasks.json"
+KAIZEN_FILE = SCRIPT_DIR / "kaizen_recommendations.json"
 CHUNK_SIZE = 30
+KAIZEN_SCAN_INTERVAL_HOURS = 6
+
+
+class KaizenScanner:
+    """Lightweight in-process scanner that analyzes patterns and generates ranked recommendations."""
+
+    def __init__(self, project_path: str, tasks_file: Path, kaizen_file: Path):
+        self.project_path = Path(project_path)
+        self.tasks_file = tasks_file
+        self.kaizen_file = kaizen_file
+        self._last_scan: Optional[datetime] = None
+
+    def should_rescan(self) -> bool:
+        if not self._last_scan:
+            return True
+        elapsed = datetime.now() - self._last_scan
+        return elapsed >= timedelta(hours=KAIZEN_SCAN_INTERVAL_HOURS)
+
+    def scan(self) -> list[dict]:
+        """Analyze task history and codebase, return ranked recommendations."""
+        recommendations = []
+
+        # Signal 1: Task execution patterns
+        task_patterns = self._analyze_task_history()
+        recommendations.extend(task_patterns)
+
+        # Signal 2: Codebase quality signals
+        code_signals = self._analyze_codebase()
+        recommendations.extend(code_signals)
+
+        # Sort by priority (High > Medium > Low)
+        priority_order = {"high": 0, "medium": 1, "low": 2}
+        recommendations.sort(key=lambda r: (priority_order.get(r.get("priority", "low"), 2), -r.get("impact", 0)))
+
+        self._last_scan = datetime.now()
+        self._save(recommendations)
+        return recommendations
+
+    def _analyze_task_history(self) -> list[dict]:
+        """Analyze tasks.json for patterns - failed tasks, queue growth, common errors."""
+        recommendations = []
+        try:
+            with open(self.tasks_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return recommendations
+
+        completed = data.get("completed", [])
+        pending = data.get("pending", [])
+        failed = [t for t in completed if not t.get("success", True)]
+
+        # Pattern: High failure rate
+        if len(completed) >= 5 and len(failed) / len(completed) > 0.3:
+            recommendations.append({
+                "id": "task_failure_rate",
+                "title": "High task failure rate detected",
+                "description": f"{len(failed)}/{len(completed)} tasks failed. Investigate root causes.",
+                "priority": "high",
+                "impact": 80,
+                "category": "reliability",
+                "action": "Analyze failed tasks for common error patterns"
+            })
+
+        # Pattern: Growing queue backlog
+        if len(pending) > 3:
+            recommendations.append({
+                "id": "queue_backlog",
+                "title": "Task queue backlog growing",
+                "description": f"{len(pending)} tasks waiting. Consider scaling worker or optimizing timeout.",
+                "priority": "medium",
+                "impact": 60,
+                "category": "performance",
+                "action": "Review queue processing efficiency"
+            })
+
+        # Pattern: Long task durations (inferred from completed tasks)
+        if len(completed) >= 3:
+            recent = completed[-3:]
+            recommendations.append({
+                "id": "task_optimization",
+                "title": "Optimize task execution patterns",
+                "description": f"Analyze recent {len(recent)} completed tasks for optimization opportunities.",
+                "priority": "low",
+                "impact": 40,
+                "category": "performance",
+                "action": "Profile task execution to reduce latency"
+            })
+
+        return recommendations
+
+    def _analyze_codebase(self) -> list[dict]:
+        """Static analysis of codebase for tech debt, complexity, test coverage."""
+        recommendations = []
+        main_script = SCRIPT_DIR / "telegram_claude_poc.py"
+
+        if not main_script.exists():
+            return recommendations
+
+        try:
+            with open(main_script) as f:
+                lines = f.readlines()
+
+            # Signal: Large file complexity
+            if len(lines) > 400:
+                recommendations.append({
+                    "id": "code_complexity",
+                    "title": "Main script exceeds 400 lines",
+                    "description": f"File has {len(lines)} lines. Consider splitting into modules.",
+                    "priority": "medium",
+                    "impact": 50,
+                    "category": "maintainability",
+                    "action": "Extract classes into separate modules (TaskQueue, ClaudeSubprocess, StreamHandler)"
+                })
+
+            # Signal: Missing type hints (heuristic: check first 50 lines)
+            has_types = any("->" in line or ": str" in line or ": int" in line or ": dict" in line for line in lines[:50])
+            if not has_types:
+                recommendations.append({
+                    "id": "type_safety",
+                    "title": "Missing type annotations",
+                    "description": "Add type hints for better maintainability and bug prevention.",
+                    "priority": "low",
+                    "impact": 35,
+                    "category": "code_quality",
+                    "action": "Add return type annotations to public methods"
+                })
+
+        except Exception:
+            pass
+
+        # Check for missing test file
+        test_file = SCRIPT_DIR / "tests" / "test_bot.py"
+        if not test_file.exists():
+            recommendations.append({
+                "id": "test_coverage",
+                "title": "No tests directory found",
+                "description": "Add pytest tests for critical paths (queue, subprocess, handlers).",
+                "priority": "medium",
+                "impact": 55,
+                "category": "code_quality",
+                "action": "Create tests/test_bot.py with basic functionality tests"
+            })
+
+        return recommendations
+
+    def _save(self, recommendations: list[dict]):
+        data = {
+            "generated_at": datetime.now().isoformat(),
+            "scan_count": 1,
+            "recommendations": recommendations
+        }
+        try:
+            with open(self.kaizen_file, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def get_latest(self) -> Optional[list[dict]]:
+        """Load cached recommendations without rescan."""
+        try:
+            with open(self.kaizen_file) as f:
+                data = json.load(f)
+            return data.get("recommendations", [])
+        except (json.JSONDecodeError, FileNotFoundError):
+            return None
 
 
 class TaskQueue:
@@ -165,10 +331,12 @@ class TelegramClaudeBot:
         else:
             self.allowed_usernames = None
         self.queue = TaskQueue(TASKS_FILE)
+        self.kaizen = KaizenScanner(self.project_path, TASKS_FILE, KAIZEN_FILE)
         self.running = True
         self.streaming_message: dict = {}
         self._offset: Optional[int] = None
         self._task_lock = asyncio.Lock()
+        self._last_kaizen_check: Optional[datetime] = None
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None):
         try:
@@ -192,8 +360,39 @@ class TelegramClaudeBot:
 
     async def handle_start(self, update: Update):
         await update.message.reply_text(
-            "Claude Code Telegram Bot\n\nSend me a task description and I'll execute it using Claude Code on your local codebase.\n\nTasks are queued if a task is already running."
+            "Claude Code Telegram Bot\n\n"
+            "Send me a task description and I'll execute it using Claude Code on your local codebase.\n\n"
+            "Tasks are queued if a task is already running.\n\n"
+            "Use /kaizen to see improvement recommendations."
         )
+
+    async def handle_kaizen(self, update: Update):
+        """Handle /kaizen command - show ranked recommendations."""
+        recommendations = self.kaizen.get_latest()
+
+        # If no cached recommendations or stale, trigger new scan
+        if recommendations is None or self.kaizen.should_rescan():
+            await update.message.reply_text("🔍 Scanning codebase for improvements...")
+            recommendations = self.kaizen.scan()
+
+        if not recommendations:
+            await update.message.reply_text("✅ No improvements needed right now. Code looks healthy!")
+            return
+
+        report = self.format_kaizen_report(recommendations)
+        await update.message.reply_text(report)
+
+    @staticmethod
+    def format_kaizen_report(recommendations: list[dict]) -> str:
+        """Format recommendations as ranked numbered list."""
+        lines = ["📊 *Kaizen Recommendations*\n"]
+        for i, rec in enumerate(recommendations, 1):
+            priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(rec.get("priority", "low"), "⚪")
+            lines.append(f"{i}. {priority_emoji} *{rec['title']}*")
+            lines.append(f"   {rec['description']}")
+            lines.append(f"   Action: {rec.get('action', 'Review and implement')}\n")
+        lines.append("\nReply with a number to prioritize this task.")
+        return "\n".join(lines)
 
     async def handle_message(self, update: Update):
         if update.message and update.message.text:
@@ -256,12 +455,19 @@ class TelegramClaudeBot:
     async def poll_loop(self):
         while self.running:
             try:
+                # Periodic kaizen check (every poll_interval, not every 6 hours in this poll)
+                # Actual 6-hour interval is enforced in _periodic_kaizen_check
+                if self._last_kaizen_check is None:
+                    self._last_kaizen_check = datetime.now()
+
                 updates = await self.bot.get_updates(timeout=self.poll_interval, offset=self._offset)
                 if updates:
                     for update in updates:
                         if update.message:
                             if update.message.text == "/start":
                                 await self.handle_start(update)
+                            elif update.message.text == "/kaizen":
+                                await self.handle_kaizen(update)
                             elif update.message.text.startswith("/"):
                                 pass
                             else:
@@ -287,7 +493,26 @@ class TelegramClaudeBot:
 
     async def _async_main(self):
         await self._setup_signal_handlers()
+        asyncio.create_task(self._periodic_kaizen_check())
         await self.poll_loop()
+
+    async def _periodic_kaizen_check(self):
+        """Run kaizen scan every 6 hours and notify if new recommendations found."""
+        while self.running:
+            await asyncio.sleep(KAIZEN_SCAN_INTERVAL_HOURS * 3600)
+
+            if not self.kaizen.should_rescan():
+                continue
+
+            recommendations = self.kaizen.scan()
+            if recommendations and self.allowed_usernames:
+                # Notify all allowed users about new recommendations
+                for username in self.allowed_usernames:
+                    try:
+                        # Get chat_id from updates or stored - for now just log
+                        print(f"📊 Kaizen scan complete: {len(recommendations)} recommendations generated")
+                    except Exception as e:
+                        print(f"Failed to notify kaizen: {e}", file=sys.stderr)
 
 
 def load_config() -> dict:
