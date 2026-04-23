@@ -1,3 +1,5 @@
 .idea
 config.yaml
 tasks.json
+kaizen_recommendations.json
+__pycache__
