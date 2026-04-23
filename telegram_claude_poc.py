@@ -11,7 +11,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -27,58 +26,108 @@ CHUNK_SIZE = 30
 KAIZEN_SCAN_INTERVAL_HOURS = 6
 
 
+SIGNAL_REGISTRY: dict[str, callable] = {}
+
+
+def register_signal(signal_id: str):
+    """Decorator to register analyzer methods."""
+    def decorator(method):
+        SIGNAL_REGISTRY[signal_id] = method
+        return method
+    return decorator
+
+
+class KaizenConfig:
+    """Default kaizen configuration."""
+    DEFAULT_CATEGORIES = {
+        "reliability": {
+            "max_results": 2,
+            "signals": ["high_failure_rate", "task_timeout", "queue_stall"],
+        },
+        "performance": {
+            "max_results": 2,
+            "signals": ["queue_backlog", "slow_tasks"],
+        },
+        "maintainability": {
+            "max_results": 2,
+            "signals": ["code_complexity", "large_file"],
+        },
+        "code_quality": {
+            "max_results": 2,
+            "signals": ["missing_tests", "missing_types"],
+        },
+        "feature_requests": {
+            "max_results": 2,
+            "signals": ["requested_feature", "repeated_pattern"],
+        },
+    }
+
+    @classmethod
+    def from_dict(cls, config: dict) -> "KaizenConfig":
+        """Merge user config with defaults."""
+        instance = cls()
+        instance.categories = {**cls.DEFAULT_CATEGORIES, **config.get("categories", {})}
+        instance.scan_interval_hours = config.get("scan_interval_hours", KAIZEN_SCAN_INTERVAL_HOURS)
+        return instance
+
+
 class KaizenScanner:
     """Lightweight in-process scanner that analyzes patterns and generates ranked recommendations."""
 
-    def __init__(self, project_path: str, tasks_file: Path, kaizen_file: Path):
+    def __init__(self, project_path: str, tasks_file: Path, kaizen_file: Path, config: Optional[dict] = None):
         self.project_path = Path(project_path)
         self.tasks_file = tasks_file
         self.kaizen_file = kaizen_file
         self._last_scan: Optional[datetime] = None
+        self.config = KaizenConfig.from_dict(config or {})
 
     def should_rescan(self) -> bool:
         if not self._last_scan:
             return True
         elapsed = datetime.now() - self._last_scan
-        return elapsed >= timedelta(hours=KAIZEN_SCAN_INTERVAL_HOURS)
+        return elapsed >= timedelta(hours=self.config.scan_interval_hours)
 
     def scan(self) -> list[dict]:
         """Analyze task history and codebase, return ranked recommendations."""
         recommendations = []
+        for signal_id, method in SIGNAL_REGISTRY.items():
+            results = method(self)
+            for r in results:
+                r["id"] = signal_id
+            recommendations.extend(results)
 
-        # Signal 1: Task execution patterns
-        task_patterns = self._analyze_task_history()
-        recommendations.extend(task_patterns)
+        # Group by category, apply max_results per category
+        by_category: dict[str, list[dict]] = {}
+        for rec in recommendations:
+            cat = rec.get("category", "uncategorized")
+            by_category.setdefault(cat, []).append(rec)
 
-        # Signal 2: Codebase quality signals
-        code_signals = self._analyze_codebase()
-        recommendations.extend(code_signals)
+        capped: list[dict] = []
+        for cat, cat_recs in by_category.items():
+            max_results = self.config.categories.get(cat, {}).get("max_results", 2)
+            capped.extend(cat_recs[:max_results])
 
         # Sort by priority (High > Medium > Low)
         priority_order = {"high": 0, "medium": 1, "low": 2}
-        recommendations.sort(key=lambda r: (priority_order.get(r.get("priority", "low"), 2), -r.get("impact", 0)))
+        capped.sort(key=lambda r: (priority_order.get(r.get("priority", "low"), 2), -r.get("impact", 0)))
 
         self._last_scan = datetime.now()
-        self._save(recommendations)
-        return recommendations
+        self._save(capped)
+        return capped
 
-    def _analyze_task_history(self) -> list[dict]:
-        """Analyze tasks.json for patterns - failed tasks, queue growth, common errors."""
+    @register_signal("high_failure_rate")
+    def _analyze_high_failure_rate(self) -> list[dict]:
+        """Task failure rate ≥30% (of 5+ completed) → reliability."""
         recommendations = []
         try:
             with open(self.tasks_file) as f:
                 data = json.load(f)
         except (json.JSONDecodeError, FileNotFoundError):
             return recommendations
-
         completed = data.get("completed", [])
-        pending = data.get("pending", [])
         failed = [t for t in completed if not t.get("success", True)]
-
-        # Pattern: High failure rate
         if len(completed) >= 5 and len(failed) / len(completed) > 0.3:
             recommendations.append({
-                "id": "task_failure_rate",
                 "title": "High task failure rate detected",
                 "description": f"{len(failed)}/{len(completed)} tasks failed. Investigate root causes.",
                 "priority": "high",
@@ -86,11 +135,65 @@ class KaizenScanner:
                 "category": "reliability",
                 "action": "Analyze failed tasks for common error patterns"
             })
+        return recommendations
 
-        # Pattern: Growing queue backlog
+    @register_signal("task_timeout")
+    def _analyze_task_timeout(self) -> list[dict]:
+        """Tasks that timed out → reliability."""
+        recommendations = []
+        try:
+            with open(self.tasks_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return recommendations
+        completed = data.get("completed", [])
+        timed_out = [t for t in completed if t.get("success") is False and "timeout" in t.get("text", "").lower()]
+        if timed_out:
+            recommendations.append({
+                "title": "Task timeout pattern detected",
+                "description": f"{len(timed_out)} tasks timed out. Review timeout settings.",
+                "priority": "high",
+                "impact": 70,
+                "category": "reliability",
+                "action": "Review task_timeout_minutes config"
+            })
+        return recommendations
+
+    @register_signal("queue_stall")
+    def _analyze_queue_stall(self) -> list[dict]:
+        """Running task stalled (stale running timestamp) → reliability."""
+        recommendations = []
+        try:
+            with open(self.tasks_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return recommendations
+        running = data.get("running")
+        if running and "started_at" in running:
+            started = datetime.fromisoformat(running["started_at"])
+            if datetime.now() - started > timedelta(minutes=self.config.scan_interval_hours * 60):
+                recommendations.append({
+                    "title": "Task queue stalled",
+                    "description": "Running task has not completed in a long time.",
+                    "priority": "high",
+                    "impact": 85,
+                    "category": "reliability",
+                    "action": "Investigate the running task or increase timeout"
+                })
+        return recommendations
+
+    @register_signal("queue_backlog")
+    def _analyze_queue_backlog(self) -> list[dict]:
+        """Pending queue >3 → performance."""
+        recommendations = []
+        try:
+            with open(self.tasks_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return recommendations
+        pending = data.get("pending", [])
         if len(pending) > 3:
             recommendations.append({
-                "id": "queue_backlog",
                 "title": "Task queue backlog growing",
                 "description": f"{len(pending)} tasks waiting. Consider scaling worker or optimizing timeout.",
                 "priority": "medium",
@@ -98,67 +201,79 @@ class KaizenScanner:
                 "category": "performance",
                 "action": "Review queue processing efficiency"
             })
+        return recommendations
 
-        # Pattern: Long task durations (inferred from completed tasks)
+    @register_signal("slow_tasks")
+    def _analyze_slow_tasks(self) -> list[dict]:
+        """Long-running tasks (recent avg duration) → performance."""
+        recommendations = []
+        try:
+            with open(self.tasks_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return recommendations
+        completed = data.get("completed", [])
         if len(completed) >= 3:
-            recent = completed[-3:]
             recommendations.append({
-                "id": "task_optimization",
                 "title": "Optimize task execution patterns",
-                "description": f"Analyze recent {len(recent)} completed tasks for optimization opportunities.",
+                "description": f"Analyze recent {len(completed[-3:])} completed tasks for optimization opportunities.",
                 "priority": "low",
                 "impact": 40,
                 "category": "performance",
                 "action": "Profile task execution to reduce latency"
             })
-
         return recommendations
 
-    def _analyze_codebase(self) -> list[dict]:
-        """Static analysis of codebase for tech debt, complexity, test coverage."""
+    @register_signal("code_complexity")
+    def _analyze_code_complexity(self) -> list[dict]:
+        """File >400 lines → maintainability."""
         recommendations = []
         main_script = SCRIPT_DIR / "telegram_claude_poc.py"
+        if main_script.exists():
+            try:
+                lines = len(main_script.read_text().splitlines())
+                if lines > 400:
+                    recommendations.append({
+                        "title": "Main script exceeds 400 lines",
+                        "description": f"File has {lines} lines. Consider splitting into modules.",
+                        "priority": "medium",
+                        "impact": 50,
+                        "category": "maintainability",
+                        "action": "Extract classes into separate modules (TaskQueue, ClaudeSubprocess, StreamHandler)"
+                    })
+            except Exception:
+                pass
+        return recommendations
 
-        if not main_script.exists():
-            return recommendations
+    @register_signal("large_file")
+    def _analyze_large_file(self) -> list[dict]:
+        """Any file >500 lines → maintainability."""
+        recommendations = []
+        for py_file in SCRIPT_DIR.glob("*.py"):
+            if py_file.name.startswith("."):
+                continue
+            try:
+                lines = len(py_file.read_text().splitlines())
+                if lines > 500:
+                    recommendations.append({
+                        "title": f"Large file: {py_file.name}",
+                        "description": f"{py_file.name} has {lines} lines. Consider splitting.",
+                        "priority": "medium",
+                        "impact": 45,
+                        "category": "maintainability",
+                        "action": f"Split {py_file.name} into smaller modules"
+                    })
+            except Exception:
+                pass
+        return recommendations
 
-        try:
-            with open(main_script) as f:
-                lines = f.readlines()
-
-            # Signal: Large file complexity
-            if len(lines) > 400:
-                recommendations.append({
-                    "id": "code_complexity",
-                    "title": "Main script exceeds 400 lines",
-                    "description": f"File has {len(lines)} lines. Consider splitting into modules.",
-                    "priority": "medium",
-                    "impact": 50,
-                    "category": "maintainability",
-                    "action": "Extract classes into separate modules (TaskQueue, ClaudeSubprocess, StreamHandler)"
-                })
-
-            # Signal: Missing type hints (heuristic: check first 50 lines)
-            has_types = any("->" in line or ": str" in line or ": int" in line or ": dict" in line for line in lines[:50])
-            if not has_types:
-                recommendations.append({
-                    "id": "type_safety",
-                    "title": "Missing type annotations",
-                    "description": "Add type hints for better maintainability and bug prevention.",
-                    "priority": "low",
-                    "impact": 35,
-                    "category": "code_quality",
-                    "action": "Add return type annotations to public methods"
-                })
-
-        except Exception:
-            pass
-
-        # Check for missing test file
+    @register_signal("missing_tests")
+    def _analyze_missing_tests(self) -> list[dict]:
+        """No tests/ directory → code_quality."""
+        recommendations = []
         test_file = SCRIPT_DIR / "tests" / "test_bot.py"
         if not test_file.exists():
             recommendations.append({
-                "id": "test_coverage",
                 "title": "No tests directory found",
                 "description": "Add pytest tests for critical paths (queue, subprocess, handlers).",
                 "priority": "medium",
@@ -166,8 +281,39 @@ class KaizenScanner:
                 "category": "code_quality",
                 "action": "Create tests/test_bot.py with basic functionality tests"
             })
-
         return recommendations
+
+    @register_signal("missing_types")
+    def _analyze_missing_types(self) -> list[dict]:
+        """No type hints in first 50 lines → code_quality."""
+        recommendations = []
+        main_script = SCRIPT_DIR / "telegram_claude_poc.py"
+        if main_script.exists():
+            try:
+                lines = main_script.read_text().splitlines()[:50]
+                has_types = any("->" in line or ": str" in line or ": int" in line or ": dict" in line for line in lines)
+                if not has_types:
+                    recommendations.append({
+                        "title": "Missing type annotations",
+                        "description": "Add type hints for better maintainability and bug prevention.",
+                        "priority": "low",
+                        "impact": 35,
+                        "category": "code_quality",
+                        "action": "Add return type annotations to public methods"
+                    })
+            except Exception:
+                pass
+        return recommendations
+
+    @register_signal("requested_feature")
+    def _analyze_requested_feature(self) -> list[dict]:
+        """Placeholder for user-requested features via message patterns."""
+        return []
+
+    @register_signal("repeated_pattern")
+    def _analyze_repeated_pattern(self) -> list[dict]:
+        """Placeholder for repeated user request patterns."""
+        return []
 
     def _save(self, recommendations: list[dict]):
         data = {
@@ -331,7 +477,7 @@ class TelegramClaudeBot:
         else:
             self.allowed_usernames = None
         self.queue = TaskQueue(TASKS_FILE)
-        self.kaizen = KaizenScanner(self.project_path, TASKS_FILE, KAIZEN_FILE)
+        self.kaizen = KaizenScanner(self.project_path, TASKS_FILE, KAIZEN_FILE, config.get("kaizen"))
         self.running = True
         self.streaming_message: dict = {}
         self._offset: Optional[int] = None
@@ -370,12 +516,8 @@ class TelegramClaudeBot:
 
     async def handle_kaizen(self, update: Update):
         """Handle /kaizen command - show ranked recommendations."""
-        recommendations = self.kaizen.get_latest()
-
-        # If no cached recommendations or stale, trigger new scan
-        if recommendations is None or self.kaizen.should_rescan():
-            await update.message.reply_text("🔍 Scanning codebase for improvements...")
-            recommendations = self.kaizen.scan()
+        await update.message.reply_text("🔍 Scanning codebase for improvements...")
+        recommendations = self.kaizen.scan()
 
         if not recommendations:
             await update.message.reply_text("✅ No improvements needed right now. Code looks healthy!")
