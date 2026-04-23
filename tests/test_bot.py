@@ -110,13 +110,12 @@ class TestKaizenScanner:
 
 
 class TestTelegramClaudeBot:
-    def test_format_kaizen_report(self):
-        recs = [
-            {"title": "Test", "description": "Desc", "priority": "high", "action": "Do it"}
-        ]
-        report = TelegramClaudeBot.format_kaizen_report(recs)
-        assert "Test" in report
-        assert "high" in report.lower() or "🔴" in report
+    def test_format_kaizen_card(self):
+        rec = {"title": "Test", "description": "Desc", "priority": "high", "action": "Do it"}
+        card = TelegramClaudeBot.format_kaizen_card(rec, 1, 3)
+        assert "Test" in card
+        assert "high" in card.lower() or "🔴" in card
+        assert "1/3" in card or "1" in card
 
     def test_authorization_rejects_unknown_user(self, tmp_path):
         config = {

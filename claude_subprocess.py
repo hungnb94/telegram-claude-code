@@ -1,3 +1,4 @@
+import os
 import subprocess
 from typing import Callable, Optional
 
@@ -23,10 +24,12 @@ class ClaudeSubprocess:
             self.process.stdin.write(f"Your task: {task_description}\n")
             self.process.stdin.flush()
             self.process.stdin.close()
-            output = self.process.stdout.read()
-            for line in output.splitlines():
-                if line:
+
+            # Stream line-by-line instead of buffering all output
+            for line in self.process.stdout:
+                if line := line.rstrip("\n"):
                     output_callback(line)
+
             self.process.wait(timeout=self.timeout_seconds)
             return self.process.returncode == 0
         except subprocess.TimeoutExpired:

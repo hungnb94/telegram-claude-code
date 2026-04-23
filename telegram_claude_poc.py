@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from telegram import Bot, Update
+from telegram import Bot, BotCommand, Update
 from telegram.error import TelegramError
 
 from task_queue import TaskQueue
@@ -333,19 +333,22 @@ class KaizenScanner:
         except (json.JSONDecodeError, FileNotFoundError):
             return recommendations
 
-        task_texts = [t.get("text", "").lower() for t in data.get("completed", [])]
+        task_texts = [t.get("text", "") for t in data.get("completed", [])]
 
         feature_keywords = ["add ", "implement", "create new", "build new", "feature", "would be nice", "wish", "want", "should have", "missing", "create"]
-        feature_requests = [t for t in task_texts if any(kw in t for kw in feature_keywords)]
+        feature_requests = [(t, t.lower()) for t in task_texts if any(kw in t.lower() for kw in feature_keywords)]
 
-        for req in feature_requests[-3:]:
+        for original, lower in feature_requests[-3:]:
+            # Extract a meaningful title from the request
+            words = original.split()
+            title = " ".join(words[:6]) + "..." if len(words) > 6 else original
             recommendations.append({
-                "title": "User-requested feature detected",
-                "description": f'"{req[:80]}" has been requested. Consider adding this.',
+                "title": f"Feature request: {title}",
+                "description": f'User requested: "{original[:150]}"',
                 "priority": "medium",
                 "impact": 65,
                 "category": "feature_requests",
-                "action": req
+                "action": "Implement this feature or add it to the backlog"
             })
         return recommendations
 
@@ -373,12 +376,12 @@ class KaizenScanner:
         if repeats and repeats[0][1] >= 2:
             original = repeats[0][0]
             recommendations.append({
-                "title": "Repeated task pattern detected",
-                "description": f'"{original[:60]}" appears {repeats[0][1]} times. Automate this.',
+                "title": f"Repeated pattern (x{repeats[0][1]}): {original[:50]}",
+                "description": f'Task "{original}" has been requested {repeats[0][1]} times. This is a good candidate for automation.',
                 "priority": "medium",
                 "impact": 60,
                 "category": "feature_requests",
-                "action": f"Create automated routine for: {original[:60]}"
+                "action": f"Create an automated routine or /command for this repeated task"
             })
         return recommendations
 
@@ -420,10 +423,18 @@ class TelegramClaudeBot:
         self.running = True
         self.streaming_message: dict = {}
         self._offset: Optional[int] = None
+        self._task_semaphore = asyncio.Semaphore(1)
         self._task_lock = asyncio.Lock()
         self._last_kaizen_check: Optional[datetime] = None
         self._pending_kaizen_selection: Optional[str] = None  # chat_id của user đang chọn kaizen
         self._cached_recommendations: Optional[list[dict]] = None
+
+        # Recover: clear stale running state from previous session
+        if self.queue.has_running_task():
+            data = self.queue._load()
+            data["running"] = None
+            self.queue._mark_dirty()
+            self.queue._save(data)
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None):
         try:
@@ -455,31 +466,75 @@ class TelegramClaudeBot:
 
     async def handle_kaizen(self, update: Update):
         """Handle /kaizen command - show ranked recommendations."""
-        await update.message.reply_text("🔍 Scanning codebase for improvements...")
+        chat_id = str(update.message.chat_id)
+        await self.bot.send_message(
+            text="🔍 *Kaizen Scanner*\n\n⏳ Scanning codebase for improvements...",
+            chat_id=chat_id,
+        )
+
         recommendations = self.kaizen.scan()
 
         if not recommendations:
-            await update.message.reply_text("✅ No improvements needed right now. Code looks healthy!")
+            await self.bot.send_message(
+                text="✅ *Kaizen Scan Complete*\n\nNo improvements needed right now. Your code looks healthy!",
+                chat_id=chat_id,
+            )
             return
 
         # Store recommendations và chat_id để handle reply
-        self._pending_kaizen_selection = str(update.message.chat_id)
+        self._pending_kaizen_selection = chat_id
         self._cached_recommendations = recommendations
 
-        report = self.format_kaizen_report(recommendations)
-        await update.message.reply_text(report)
+        # Send each recommendation as a separate formatted card
+        for i, rec in enumerate(recommendations, 1):
+            card = self.format_kaizen_card(rec, i, len(recommendations))
+            await self.bot.send_message(text=card, chat_id=chat_id)
+
+        # Prompt for selection
+        count = len(recommendations)
+        await self.bot.send_message(
+            text=f"💡 *Reply with a number (1-{count})* to prioritize a task as your next request.",
+            chat_id=chat_id,
+        )
 
     @staticmethod
-    def format_kaizen_report(recommendations: list[dict]) -> str:
-        """Format recommendations as ranked numbered list."""
-        lines = ["📊 *Kaizen Recommendations*\n"]
-        for i, rec in enumerate(recommendations, 1):
-            priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(rec.get("priority", "low"), "⚪")
-            lines.append(f"{i}. {priority_emoji} *{rec['title']}*")
-            lines.append(f"   {rec['description']}")
-            lines.append(f"   Action: {rec.get('action', 'Review and implement')}\n")
-        lines.append("\nReply with a number to prioritize this task.")
-        return "\n".join(lines)
+    def format_kaizen_card(rec: dict, index: int, total: int) -> str:
+        """Format a single recommendation as a structured issue card."""
+        priority = rec.get("priority", "medium").upper()
+        category = rec.get("category", "general").replace("_", " ").title()
+        impact = rec.get("impact", 50)
+
+        # Priority emoji and color bar
+        if priority == "HIGH":
+            priority_icon = "🔴"
+            bar = "▓▓▓▓▓"
+        elif priority == "MEDIUM":
+            priority_icon = "🟡"
+            bar = "▓▓▓░░"
+        else:
+            priority_icon = "🟢"
+            bar = "▓░░░░"
+
+        title = rec.get("title", "Untitled")
+        description = rec.get("description", "")
+        action = rec.get("action", "Review and implement")
+
+        # JIRA/GitHub style format
+        card = [
+            f"━━━━━━━━━━━━━━━━━━━━",
+            f"#{index}/{total} | {priority_icon} *{priority}* | Impact: {bar} ({impact}/100)",
+            f"━━━━━━━━━━━━━━━━━━━━",
+            f"📋 *{title}*",
+            f"",
+            f"🏷️ Category: `{category}`",
+            f"",
+            f"📖 *Description:*",
+            f"{description}",
+            f"",
+            f"🎯 *Suggested Action:*",
+            f"`{action}`",
+        ]
+        return "\n".join(card)
 
     async def handle_message(self, update: Update):
         if update.message and update.message.text:
@@ -508,7 +563,11 @@ class TelegramClaudeBot:
                         self._cached_recommendations = None
                         # Execute the kaizen task via Claude Code
                         self.queue.set_running({"message_id": message_id, "text": action, "chat_id": chat_id})
-                        await update.message.reply_text(f"🎯 Executing: {selected['title']}\n\n{action}")
+                        await self.bot.send_message(
+                            text=f"🎯 *Executing: {selected['title']}*\n\n📖 {action}",
+                            chat_id=chat_id,
+                            reply_to_message_id=int(message_id),
+                        )
                         asyncio.create_task(self._execute_task(message_id, chat_id, action))
                         return
                 except (ValueError, IndexError):
@@ -517,49 +576,107 @@ class TelegramClaudeBot:
 
             if self.queue.has_running_task():
                 self.queue.enqueue({"message_id": message_id, "text": text, "chat_id": chat_id})
-                await update.message.reply_text(f"Task queued (position: {len(self.queue.peek())})")
-            else:
-                self.queue.set_running({"message_id": message_id, "text": text, "chat_id": chat_id})
-                await update.message.reply_text("Starting task...")
-                asyncio.create_task(self._execute_task(message_id, chat_id, text, is_kaizen=(self._pending_kaizen_selection is not None and self._pending_kaizen_selection == chat_id)))
-
-    async def _execute_task(self, message_id: str, chat_id: str, text: str, is_kaizen: bool = False):
-        async with self._task_lock:
-            stream_handler = StreamHandler()
-            run_path = SCRIPT_DIR if is_kaizen else self.project_path
-
-            try:
-                streaming_msg = await self.bot.send_message(
-                    text="⏳ Running...",
+                await self.bot.send_message(
+                    text=f"📋 *Task queued*\n\n⏳ Position: {len(self.queue.peek())} in queue",
                     chat_id=chat_id,
                     reply_to_message_id=int(message_id),
                 )
-                self.streaming_message[message_id] = str(streaming_msg.message_id)
-            except TelegramError as e:
-                print(f"Failed to create streaming message: {e}", file=sys.stderr)
-                self.queue.complete(message_id, False)
-                return
+            else:
+                self.queue.set_running({"message_id": message_id, "text": text, "chat_id": chat_id})
+                await self.bot.send_message(
+                    text="📋 *Starting task...*",
+                    chat_id=chat_id,
+                    reply_to_message_id=int(message_id),
+                )
+                asyncio.create_task(self._execute_task(message_id, chat_id, text))
 
-            def output_callback(line: str):
-                chunks = stream_handler.add_line(line)
-                for chunk in chunks:
-                    asyncio.create_task(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(stream_handler.buffer)))
+    async def _execute_task(self, message_id: str, chat_id: str, text: str):
+        await self._task_semaphore.acquire()
+        stream_handler = StreamHandler(CHUNK_SIZE)
+        run_path = self.project_path
+        pending_edit_tasks: list = []
 
-            def error_callback(line: str):
-                asyncio.create_task(self.send_text(chat_id, f"❌ {line}"))
+        try:
+            # Phase 1: Starting
+            streaming_msg = await self.bot.send_message(
+                text="📋 *Starting task...*",
+                chat_id=chat_id,
+                reply_to_message_id=int(message_id),
+            )
+            self.streaming_message[message_id] = str(streaming_msg.message_id)
+        except TelegramError as e:
+            print(f"Failed to create streaming message: {e}", file=sys.stderr)
+            self.queue.complete(message_id, False)
+            self._task_semaphore.release()
+            self._process_next()
+            return
 
-            claude = ClaudeSubprocess(run_path, self.timeout_minutes)
-            success = claude.run(text, output_callback, error_callback)
+        # Phase 2: Running - update status
+        await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
+            "📋 *Starting task...*\n⏳ *Running...*")
 
-            remaining = stream_handler.flush()
-            if remaining:
-                asyncio.create_task(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), "\n".join(remaining)))
+        async def edit_output():
+            chunks = "\n".join(stream_handler.buffer)
+            if chunks:
+                task = self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
+                    f"📋 *Starting task...*\n⏳ *Running...*\n\n```\n{chunks}\n```")
+                pending_edit_tasks.append(task)
+                return task
+            return None
 
-            self.queue.complete(message_id, success)
+        async def send_error(line: str):
+            task = self.send_text(chat_id, f"❌ {line}")
+            pending_edit_tasks.append(task)
+            return task
 
-            final_text = "✅ Task completed" if success else "❌ Task failed"
-            asyncio.create_task(self.edit_message(chat_id, self.streaming_message.get(message_id, ""), final_text))
-            self.streaming_message.pop(message_id, None)
+        claude = ClaudeSubprocess(run_path, self.timeout_minutes)
+
+        def output_callback(line: str):
+            chunks = stream_handler.add_line(line)
+            if chunks:
+                loop = asyncio.get_event_loop()
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(edit_output()))
+
+        def error_callback(line: str):
+            loop = asyncio.get_event_loop()
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(send_error(line)))
+
+        success = claude.run(text, output_callback, error_callback)
+
+        remaining = stream_handler.flush()
+        if remaining:
+            await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
+                f"📋 *Starting task...*\n⏳ *Running...*\n\n```\n" + "\n".join(remaining) + "\n```")
+
+        # Wait for all scheduled edit tasks to complete
+        if pending_edit_tasks:
+            await asyncio.gather(*pending_edit_tasks, return_exceptions=True)
+
+        self.queue.complete(message_id, success)
+
+        # Phase 3: Final status - include output
+        final_output = "\n".join(stream_handler.buffer) if stream_handler.buffer else ""
+        if final_output:
+            final_text = f"✅ *Task completed*\n\n```\n{final_output}\n```"
+        elif not success:
+            final_text = "❌ *Task failed* (no output captured)"
+        else:
+            final_text = "✅ *Task completed successfully*"
+        await self.edit_message(chat_id, self.streaming_message.get(message_id, ""), final_text)
+        self.streaming_message.pop(message_id, None)
+
+        self._task_semaphore.release()
+        self._process_next()
+
+    def _process_next(self):
+        """Pick up and execute the next pending task if any."""
+        next_task = self.queue.dequeue()
+        if next_task:
+            asyncio.create_task(self._execute_task(
+                next_task["message_id"],
+                next_task["chat_id"],
+                next_task["text"],
+            ))
 
     async def poll_loop(self):
         while self.running:
@@ -602,8 +719,21 @@ class TelegramClaudeBot:
 
     async def _async_main(self):
         await self._setup_signal_handlers()
+        await self._set_bot_commands()
         asyncio.create_task(self._periodic_kaizen_check())
+        # Process any pending tasks from previous session
+        self._process_next()
         await self.poll_loop()
+
+    async def _set_bot_commands(self):
+        """Set bot menu commands."""
+        commands = [
+            BotCommand("start", "Start the bot"),
+            BotCommand("help", "Show help information"),
+            BotCommand("status", "Show current queue status"),
+            BotCommand("kaizen", "Scan for improvement recommendations"),
+        ]
+        await self.bot.set_my_commands(commands)
 
     async def _periodic_kaizen_check(self):
         """Run kaizen scan every 6 hours and notify if new recommendations found."""
