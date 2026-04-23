@@ -27,6 +27,11 @@ TASKS_FILE = SCRIPT_DIR / "tasks.json"
 KAIZEN_FILE = SCRIPT_DIR / "kaizen_recommendations.json"
 CHUNK_SIZE = 30
 KAIZEN_SCAN_INTERVAL_HOURS = 6
+KILOCODE_REVIEW_ENABLED = True
+KILOCODE_REVIEW_TIMEOUT_SECONDS = 300
+REVIEW_MAX_RETRIES_DEFAULT = 3
+REVIEW_PASS_KEYWORDS = ["approved", "lgtm", "looks good", "no issues", "pass"]
+REVIEW_FAIL_KEYWORDS = ["issue", "problem", "warning", "error", "bug", "security"]
 
 
 SIGNAL_REGISTRY: dict[str, callable] = {}
@@ -75,6 +80,76 @@ class KaizenConfig:
             instance.categories[cat] = {**defaults, **user_cat}
         instance.scan_interval_hours = config.get("scan_interval_hours", KAIZEN_SCAN_INTERVAL_HOURS)
         return instance
+
+
+class KiloCodeReviewer:
+    """Cross-review code using KiloCode AI after Claude Code completes a task."""
+
+    def __init__(
+        self,
+        project_path: str,
+        timeout_seconds: int = KILOCODE_REVIEW_TIMEOUT_SECONDS,
+        max_retries: int = REVIEW_MAX_RETRIES_DEFAULT,
+        pass_keywords: list[str] = REVIEW_PASS_KEYWORDS,
+        fail_keywords: list[str] = REVIEW_FAIL_KEYWORDS,
+    ):
+        self.project_path = project_path
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
+        self.pass_keywords = pass_keywords
+        self.fail_keywords = fail_keywords
+
+    def review(self, task_description: str) -> tuple[bool, str]:
+        """Run KiloCode review on the completed task. Returns (passed, output)."""
+        import subprocess
+
+        prompt = (
+            f"Review the changes made for this task: '{task_description}'\n\n"
+            "Focus on: code quality, potential bugs, security issues, "
+            "performance concerns, and adherence to best practices. "
+            "Provide specific, actionable feedback. "
+            "End your review with 'APPROVED' if no major issues, or list specific issues that need fixing."
+        )
+
+        output_lines: list[str] = []
+
+        def collect_output(line: str):
+            if line := line.rstrip("\n"):
+                output_lines.append(line)
+
+        process = subprocess.Popen(
+            ["kilocode", "run", "--prompt", prompt, "--dir", self.project_path, "--auto", "--format", "default"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        try:
+            for line in process.stdout:
+                collect_output(line)
+
+            process.wait(timeout=self.timeout_seconds)
+            output = "\n".join(output_lines)
+            passed = self._evaluate_pass(output, process.returncode)
+            return passed, output
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            return False, "Review timed out after {} seconds".format(self.timeout_seconds)
+        except Exception as e:
+            process.terminate()
+            return False, f"Review error: {e}"
+
+    def _evaluate_pass(self, output: str, returncode: int) -> bool:
+        """Evaluate pass/fail based on exit code + keyword analysis."""
+        if returncode != 0:
+            return False
+
+        output_lower = output.lower()
+        has_fail_keyword = any(kw in output_lower for kw in self.fail_keywords)
+        has_pass_keyword = any(kw in output_lower for kw in self.pass_keywords)
+
+        return has_pass_keyword and not has_fail_keyword
 
 
 class KaizenScanner:
@@ -338,7 +413,7 @@ class KaizenScanner:
         feature_keywords = ["add ", "implement", "create new", "build new", "feature", "would be nice", "wish", "want", "should have", "missing", "create"]
         feature_requests = [(t, t.lower()) for t in task_texts if any(kw in t.lower() for kw in feature_keywords)]
 
-        for original, lower in feature_requests[-3:]:
+        for original, _ in feature_requests[-3:]:
             # Extract a meaningful title from the request
             words = original.split()
             title = " ".join(words[:6]) + "..." if len(words) > 6 else original
@@ -420,6 +495,19 @@ class TelegramClaudeBot:
             self.allowed_usernames = None
         self.queue = TaskQueue(TASKS_FILE)
         self.kaizen = KaizenScanner(self.project_path, TASKS_FILE, KAIZEN_FILE, config.get("kaizen"))
+
+        review_config = config.get("review", {})
+        if review_config.get("enabled", KILOCODE_REVIEW_ENABLED):
+            self.kilocode_reviewer = KiloCodeReviewer(
+                project_path=self.project_path,
+                timeout_seconds=review_config.get("timeout_seconds", KILOCODE_REVIEW_TIMEOUT_SECONDS),
+                max_retries=review_config.get("max_retries", REVIEW_MAX_RETRIES_DEFAULT),
+                pass_keywords=review_config.get("pass_keywords", REVIEW_PASS_KEYWORDS),
+                fail_keywords=review_config.get("fail_keywords", REVIEW_FAIL_KEYWORDS),
+            )
+        else:
+            self.kilocode_reviewer = None
+
         self.running = True
         self.streaming_message: dict = {}
         self._offset: Optional[int] = None
@@ -654,7 +742,59 @@ class TelegramClaudeBot:
 
         self.queue.complete(message_id, success)
 
-        # Phase 3: Final status - include output
+        # Phase 3: KiloCode review loop (retry if failed)
+        if success and self.kilocode_reviewer:
+            retry_count = 0
+            last_review_output = ""
+            last_review_passed = False
+
+            while retry_count <= self.kilocode_reviewer.max_retries:
+                retry_label = f" (attempt {retry_count + 1}/{self.kilocode_reviewer.max_retries + 1})" if retry_count > 0 else ""
+                await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
+                    f"✅ *Task completed*\n\n🔍 *Running KiloCode review...*{retry_label}")
+
+                passed, review_output = self.kilocode_reviewer.review(text)
+
+                if retry_count > 0:
+                    last_review_output = f"[Retry {retry_count}] Previous issues:\n{last_review_output}\n\n---\nNew review:\n{review_output}"
+                else:
+                    last_review_output = review_output
+
+                last_review_passed = passed
+
+                if passed:
+                    break
+
+                retry_count += 1
+                if retry_count > self.kilocode_reviewer.max_retries:
+                    break
+
+                # Retry Claude Code with review feedback
+                retry_msg = f"Fix issues from KiloCode review: {review_output}"
+                await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
+                    f"⚠️ *Review failed - retrying with feedback...*\n\n📝 Issue: {review_output[:500]}")
+
+                claude_retry = ClaudeSubprocess(run_path, self.timeout_minutes)
+                retry_success = claude_retry.run(retry_msg, output_callback, error_callback)
+
+                if not retry_success:
+                    await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
+                        f"❌ *Retry failed* - stopping after {retry_count} attempts")
+                    break
+
+            # Final review result
+            if last_review_passed:
+                final_text = f"✅ *Task completed & reviewed*\n\n📊 *KiloCode: PASSED*\n\n```\n{last_review_output[:1500]}\n```"
+            else:
+                final_text = f"⚠️ *Task completed*\n📊 *KiloCode: Max retries reached*\n\n```\n{last_review_output[:1500]}\n```"
+
+            await self.edit_message(chat_id, self.streaming_message.get(message_id, ""), final_text)
+            self.streaming_message.pop(message_id, None)
+            self._task_semaphore.release()
+            self._process_next()
+            return
+
+        # Phase 4: Final status (if no review)
         final_output = "\n".join(stream_handler.buffer) if stream_handler.buffer else ""
         if final_output:
             final_text = f"✅ *Task completed*\n\n```\n{final_output}\n```"
@@ -765,6 +905,13 @@ def load_config() -> dict:
         config["allowed_telegram_usernames"] = [u.strip() for u in raw_usernames if u.strip()]
     else:
         config["allowed_telegram_usernames"] = [u.strip() for u in raw_usernames.split(",") if u.strip()]
+
+    # Review config (KiloCode post-task review)
+    config["review"] = {
+        "enabled": os.environ.get("KILOCODE_REVIEW_ENABLED", "true").lower() == "true",
+        "max_retries": int(os.environ.get("KILOCODE_REVIEW_MAX_RETRIES", config.get("review", {}).get("max_retries", REVIEW_MAX_RETRIES_DEFAULT))),
+        "timeout_seconds": int(os.environ.get("KILOCODE_REVIEW_TIMEOUT", config.get("review", {}).get("timeout_seconds", KILOCODE_REVIEW_TIMEOUT_SECONDS))),
+    }
 
     if not config["telegram_bot_token"]:
         print("TELEGRAM_BOT_TOKEN environment variable or config.yaml required", file=sys.stderr)

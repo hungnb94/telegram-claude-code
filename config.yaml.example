@@ -37,3 +37,22 @@ kaizen:
       signals:
         - requested_feature
         - repeated_pattern
+
+# KiloCode review settings (runs after Claude Code completes a task)
+review:
+  enabled: true
+  max_retries: 3
+  timeout_seconds: 300
+  pass_keywords:
+    - approved
+    - lgtm
+    - looks good
+    - no issues
+    - pass
+  fail_keywords:
+    - issue
+    - problem
+    - warning
+    - error
+    - bug
+    - security
