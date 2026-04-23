@@ -307,13 +307,64 @@ class KaizenScanner:
 
     @register_signal("requested_feature")
     def _analyze_requested_feature(self) -> list[dict]:
-        """Placeholder for user-requested features via message patterns."""
-        return []
+        """Detect feature requests from user task patterns."""
+        recommendations = []
+        try:
+            with open(self.tasks_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return recommendations
+
+        task_texts = [t.get("text", "").lower() for t in data.get("completed", [])]
+
+        # Keywords suggesting new features
+        feature_keywords = ["add ", "implement", "create ", "new ", "build ", "feature", "would be nice", "wish", "want", "should have"]
+        feature_requests = [t for t in task_texts if any(kw in t for kw in feature_keywords)]
+
+        if len(feature_requests) >= 2:
+            top_request = feature_requests[-1]
+            recommendations.append({
+                "title": "User-requested feature detected",
+                "description": f'"{top_request[:80]}..." has been requested. Consider adding this.',
+                "priority": "medium",
+                "impact": 65,
+                "category": "feature_requests",
+                "action": top_request
+            })
+        return recommendations
 
     @register_signal("repeated_pattern")
     def _analyze_repeated_pattern(self) -> list[dict]:
-        """Placeholder for repeated user request patterns."""
-        return []
+        """Detect repeated user request patterns → deduplication opportunity."""
+        recommendations = []
+        try:
+            with open(self.tasks_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return recommendations
+
+        task_texts = [t.get("text", "").lower() for t in data.get("completed", [])]
+
+        # Find tasks that appear multiple times (normalized)
+        from collections import Counter
+        normalized = []
+        for t in task_texts:
+            words = set(t.split())
+            if len(words) >= 3:
+                normalized.append(" ".join(sorted(words)))
+
+        repeats = Counter(normalized).most_common(1)
+        if repeats and repeats[0][1] >= 2:
+            original = repeats[0][0]
+            recommendations.append({
+                "title": "Repeated task pattern detected",
+                "description": f'"{original[:60]}" appears {repeats[0][1]} times. Automate this.',
+                "priority": "medium",
+                "impact": 60,
+                "category": "feature_requests",
+                "action": f"Create automated routine for: {original[:60]}"
+            })
+        return recommendations
 
     def _save(self, recommendations: list[dict]):
         data = {
