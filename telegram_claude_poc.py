@@ -338,6 +338,7 @@ class TelegramClaudeBot:
         self._task_lock = asyncio.Lock()
         self._last_kaizen_check: Optional[datetime] = None
         self._pending_kaizen_selection: Optional[str] = None  # chat_id của user đang chọn kaizen
+        self._cached_recommendations: Optional[list[dict]] = None
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None):
         try:
@@ -444,11 +445,7 @@ class TelegramClaudeBot:
     async def _execute_task(self, message_id: str, chat_id: str, text: str, is_kaizen: bool = False):
         async with self._task_lock:
             stream_handler = StreamHandler()
-
-            # For kaizen tasks, run Claude Code on the bot's own directory to improve itself
             run_path = SCRIPT_DIR if is_kaizen else self.project_path
-        async with self._task_lock:
-            stream_handler = StreamHandler()
 
             try:
                 streaming_msg = await self.bot.send_message(
@@ -537,13 +534,8 @@ class TelegramClaudeBot:
 
             recommendations = self.kaizen.scan()
             if recommendations and self.allowed_usernames:
-                # Notify all allowed users about new recommendations
-                for username in self.allowed_usernames:
-                    try:
-                        # Get chat_id from updates or stored - for now just log
-                        print(f"📊 Kaizen scan complete: {len(recommendations)} recommendations generated")
-                    except Exception as e:
-                        print(f"Failed to notify kaizen: {e}", file=sys.stderr)
+                print(f"📊 Kaizen scan complete: {len(recommendations)} recommendations generated")
+                print("Run /kaizen to see them.")
 
 
 def load_config() -> dict:
