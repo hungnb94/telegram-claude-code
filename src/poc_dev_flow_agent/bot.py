@@ -15,16 +15,15 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from telegram import Bot, BotCommand, Update
+from telegram import Bot as TelegramBot, BotCommand, Update
 from telegram.error import TelegramError
 
-from task_queue import TaskQueue
-from claude_subprocess import ClaudeSubprocess
-from stream_handler import StreamHandler
+from poc_dev_flow_agent.task_queue import TaskQueue
+from poc_dev_flow_agent.claude_subprocess import ClaudeSubprocess
+from poc_dev_flow_agent.stream_handler import StreamHandler
 
-SCRIPT_DIR = Path(__file__).parent
-TASKS_FILE = SCRIPT_DIR / "tasks.json"
-KAIZEN_FILE = SCRIPT_DIR / "kaizen_recommendations.json"
+PACKAGE_DIR = Path(__file__).parent.parent.parent
+DATA_DIR = PACKAGE_DIR / "data"
 CHUNK_SIZE = 30
 KAIZEN_SCAN_INTERVAL_HOURS = 6
 KILOCODE_REVIEW_ENABLED = True
@@ -119,7 +118,7 @@ class KiloCodeReviewer:
                 output_lines.append(line)
 
         process = subprocess.Popen(
-            ["kilocode", "run", "--prompt", prompt, "--dir", self.project_path, "--auto", "--format", "default"],
+            ["kilocode", "run", prompt, "--dir", self.project_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -322,7 +321,7 @@ class KaizenScanner:
     def _analyze_code_complexity(self) -> list[dict]:
         """File >400 lines → maintainability."""
         recommendations = []
-        main_script = SCRIPT_DIR / "telegram_claude_poc.py"
+        main_script = PACKAGE_DIR / "src" / "poc_dev_flow_agent" / "bot.py"
         if main_script.exists():
             try:
                 lines = len(main_script.read_text().splitlines())
@@ -343,9 +342,8 @@ class KaizenScanner:
     def _analyze_large_file(self) -> list[dict]:
         """Any file >500 lines → maintainability."""
         recommendations = []
-        for py_file in SCRIPT_DIR.glob("*.py"):
-            if py_file.name.startswith("."):
-                continue
+        src_dir = PACKAGE_DIR / "src" / "poc_dev_flow_agent"
+        for py_file in src_dir.glob("*.py"):
             try:
                 lines = len(py_file.read_text().splitlines())
                 if lines > 500:
@@ -365,7 +363,7 @@ class KaizenScanner:
     def _analyze_missing_tests(self) -> list[dict]:
         """No tests/ directory → code_quality."""
         recommendations = []
-        test_file = SCRIPT_DIR / "tests" / "test_bot.py"
+        test_file = PACKAGE_DIR / "tests" / "test_bot.py"
         if not test_file.exists():
             recommendations.append({
                 "title": "No tests directory found",
@@ -381,7 +379,7 @@ class KaizenScanner:
     def _analyze_missing_types(self) -> list[dict]:
         """No type hints in first 50 lines → code_quality."""
         recommendations = []
-        main_script = SCRIPT_DIR / "telegram_claude_poc.py"
+        main_script = PACKAGE_DIR / "src" / "poc_dev_flow_agent" / "bot.py"
         if main_script.exists():
             try:
                 lines = main_script.read_text().splitlines()[:50]
@@ -483,9 +481,9 @@ class KaizenScanner:
             return None
 
 
-class TelegramClaudeBot:
+class Bot:
     def __init__(self, config: dict):
-        self.bot = Bot(token=config["telegram_bot_token"])
+        self.bot = TelegramBot(token=config["telegram_bot_token"])
         self.project_path = config["claude_code_project_path"]
         self.poll_interval = config.get("poll_interval_seconds", 5)
         self.timeout_minutes = config.get("task_timeout_minutes", 30)
@@ -494,8 +492,11 @@ class TelegramClaudeBot:
             self.allowed_usernames = set(u.lower() for u in raw_usernames)
         else:
             self.allowed_usernames = None
-        self.queue = TaskQueue(TASKS_FILE)
-        self.kaizen = KaizenScanner(self.project_path, TASKS_FILE, KAIZEN_FILE, config.get("kaizen"))
+
+        tasks_file = DATA_DIR / "tasks.json"
+        kaizen_file = DATA_DIR / "kaizen_recommendations.json"
+        self.queue = TaskQueue(tasks_file)
+        self.kaizen = KaizenScanner(self.project_path, tasks_file, kaizen_file, config.get("kaizen"))
 
         review_config = config.get("review", {})
         if review_config.get("enabled", KILOCODE_REVIEW_ENABLED):
@@ -844,7 +845,7 @@ class TelegramClaudeBot:
                             elif update.message.text.startswith("/"):
                                 pass
                             else:
-                                await self.handle_message(update)
+                                await update.message
                         self._offset = update.update_id + 1
                 await asyncio.sleep(self.poll_interval)
             except TelegramError as e:
@@ -897,7 +898,7 @@ class TelegramClaudeBot:
 
 
 def load_config() -> dict:
-    config_file = SCRIPT_DIR / "config.yaml"
+    config_file = PACKAGE_DIR / "config.yaml"
     if config_file.exists():
         with open(config_file) as f:
             config = yaml.safe_load(f)
@@ -933,7 +934,7 @@ def load_config() -> dict:
 
 def main():
     config = load_config()
-    bot = TelegramClaudeBot(config)
+    bot = Bot(config)
     print("Bot started. Press Ctrl+C to stop.")
     bot.start()
 

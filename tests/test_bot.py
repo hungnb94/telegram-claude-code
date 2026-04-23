@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from telegram_claude_poc import KaizenScanner, TaskQueue, StreamHandler, TelegramClaudeBot
+from poc_dev_flow_agent.bot import KaizenScanner, Bot
+from poc_dev_flow_agent.task_queue import TaskQueue
+from poc_dev_flow_agent.stream_handler import StreamHandler
 
 
 @pytest.mark.unit
@@ -113,10 +115,10 @@ class TestKaizenScanner:
 
 
 @pytest.mark.unit
-class TestTelegramClaudeBot:
+class TestBot:
     def test_format_kaizen_card(self):
         rec = {"title": "Test", "description": "Desc", "priority": "high", "action": "Do it"}
-        card = TelegramClaudeBot.format_kaizen_card(rec, 1, 3)
+        card = Bot.format_kaizen_card(rec, 1, 3)
         assert "Test" in card
         assert "high" in card.lower() or "🔴" in card
         assert "1/3" in card or "1" in card
@@ -127,5 +129,5 @@ class TestTelegramClaudeBot:
             "claude_code_project_path": str(tmp_path),
             "allowed_telegram_usernames": ["allowed_user"],
         }
-        bot = TelegramClaudeBot(config)
+        bot = Bot(config)
         assert bot.allowed_usernames == {"allowed_user"}

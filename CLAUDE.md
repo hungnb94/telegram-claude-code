@@ -15,12 +15,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # Run the bot
-python telegram_claude_poc.py
+PYTHONPATH=src python -m poc_dev_flow_agent.bot
 
 # Run tests
-pytest -m unit tests/           # unit tests only (90%)
-pytest -m integration tests/   # integration tests only (10%)
-pytest tests/                   # all tests
+PYTHONPATH=src pytest -m unit tests/           # unit tests only (90%)
+PYTHONPATH=src pytest -m integration tests/   # integration tests only (10%)
+PYTHONPATH=src pytest tests/                   # all tests
 ```
 
 ## TDD Workflow
@@ -59,16 +59,30 @@ poll_interval_seconds: 5
 task_timeout_minutes: 30
 ```
 
+## Project Structure
+
+```
+poc-dev-flow-agent/
+├── src/poc_dev_flow_agent/   # Source package
+│   ├── bot.py                # Main entry point (poller + Claude wrapper + queue + stream)
+│   ├── task_queue.py         # Task queue with JSON persistence
+│   ├── claude_subprocess.py  # Claude Code subprocess wrapper
+│   └── stream_handler.py     # Output streaming handler
+├── data/                     # Runtime data (gitignored)
+│   ├── tasks.json            # Persisted task queue state
+│   └── kaizen_recommendations.json  # Kaizen scanner recommendations
+├── tests/                    # Test suite
+│   ├── unit/                 # Fast, isolated unit tests (90%)
+│   └── integration/           # Slower integration tests (10%)
+├── docs/                     # Design documents
+├── config.yaml.example       # Configuration template
+└── CLAUDE.md                 # This file
+```
+
 ## Architecture
-
-- `telegram_claude_poc.py` - Main entry point (poller + Claude Code wrapper + queue + stream handler)
-- `config.yaml.example` - Configuration template
-- `tasks.json` - Persisted task queue state (gitignored)
-
-## Key Design Decisions
 
 - Claude Code runs as subprocess on local machine (same machine as bot)
 - Messages are queued in-memory, processed sequentially by a single worker
 - Claude Code output is streamed line-by-line back to Telegram via `edit_message`
-- Task state persists to `tasks.json` for crash recovery
+- Task state persists to `data/tasks.json` for crash recovery
 - Project path is configurable per deployment (not hardcoded)
