@@ -64,9 +64,12 @@ class KaizenConfig:
 
     @classmethod
     def from_dict(cls, config: dict) -> "KaizenConfig":
-        """Merge user config with defaults."""
+        """Merge user config with defaults, deep-merging each category dict."""
         instance = cls()
-        instance.categories = {**cls.DEFAULT_CATEGORIES, **config.get("categories", {})}
+        instance.categories = {}
+        for cat, defaults in cls.DEFAULT_CATEGORIES.items():
+            user_cat = config.get("categories", {}).get(cat, {})
+            instance.categories[cat] = {**defaults, **user_cat}
         instance.scan_interval_hours = config.get("scan_interval_hours", KAIZEN_SCAN_INTERVAL_HOURS)
         return instance
 
@@ -96,24 +99,36 @@ class KaizenScanner:
                 r["id"] = signal_id
             recommendations.extend(results)
 
-        # Group by category, apply min_results per category
+        # Group by category
         by_category: dict[str, list[dict]] = {}
         for rec in recommendations:
             cat = rec.get("category", "uncategorized")
             by_category.setdefault(cat, []).append(rec)
 
-        capped: list[dict] = []
+        # Collect all recommendations sorted by priority/impact
+        priority_order = {"high": 0, "medium": 1, "low": 2}
+        all_sorted = sorted(recommendations, key=lambda r: (priority_order.get(r.get("priority", "low"), 2), -r.get("impact", 0)))
+
+        # Apply min_results per category, filling gaps from pool
+        pool = list(all_sorted)
+        result: list[dict] = []
         for cat, cat_recs in by_category.items():
             min_results = self.config.categories.get(cat, {}).get("min_results", 2)
-            capped.extend(cat_recs[:min_results])
+            selected = cat_recs[:min_results]
+            result.extend(selected)
+            # Remove selected from pool so they don't appear twice
+            for r in selected:
+                if r in pool:
+                    pool.remove(r)
 
-        # Sort by priority (High > Medium > Low)
-        priority_order = {"high": 0, "medium": 1, "low": 2}
-        capped.sort(key=lambda r: (priority_order.get(r.get("priority", "low"), 2), -r.get("impact", 0)))
+        # If total < sum of all min_results, fill from pool (prioritized)
+        total_min = sum(self.config.categories.get(cat, {}).get("min_results", 2) for cat in by_category)
+        while len(result) < total_min and pool:
+            result.append(pool.pop(0))
 
         self._last_scan = datetime.now()
-        self._save(capped)
-        return capped
+        self._save(result)
+        return result
 
     @register_signal("high_failure_rate")
     def _analyze_high_failure_rate(self) -> list[dict]:
@@ -317,19 +332,17 @@ class KaizenScanner:
 
         task_texts = [t.get("text", "").lower() for t in data.get("completed", [])]
 
-        # Keywords suggesting new features
-        feature_keywords = ["add ", "implement", "create ", "new ", "build ", "feature", "would be nice", "wish", "want", "should have"]
+        feature_keywords = ["add ", "implement", "create new", "build new", "feature", "would be nice", "wish", "want", "should have", "missing", "create"]
         feature_requests = [t for t in task_texts if any(kw in t for kw in feature_keywords)]
 
-        if len(feature_requests) >= 2:
-            top_request = feature_requests[-1]
+        for req in feature_requests[-3:]:
             recommendations.append({
                 "title": "User-requested feature detected",
-                "description": f'"{top_request[:80]}..." has been requested. Consider adding this.',
+                "description": f'"{req[:80]}" has been requested. Consider adding this.',
                 "priority": "medium",
                 "impact": 65,
                 "category": "feature_requests",
-                "action": top_request
+                "action": req
             })
         return recommendations
 
