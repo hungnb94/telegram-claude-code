@@ -2,3 +2,7 @@ telegram_bot_token: "YOUR_BOT_TOKEN_HERE"
 claude_code_project_path: "/path/to/your/codebase"
 poll_interval_seconds: 5
 task_timeout_minutes: 30
+
+# Usernames (without @) allowed to execute tasks. Empty list = allow anyone.
+# Get username from Telegram profile settings.
+allowed_telegram_usernames: []

@@ -159,6 +159,11 @@ class TelegramClaudeBot:
         self.project_path = config["claude_code_project_path"]
         self.poll_interval = config.get("poll_interval_seconds", 5)
         self.timeout_minutes = config.get("task_timeout_minutes", 30)
+        raw_usernames = config.get("allowed_telegram_usernames")
+        if raw_usernames is not None and len(raw_usernames) > 0:
+            self.allowed_usernames = set(u.lower() for u in raw_usernames)
+        else:
+            self.allowed_usernames = None
         self.queue = TaskQueue(TASKS_FILE)
         self.running = True
         self.streaming_message: dict = {}
@@ -195,6 +200,13 @@ class TelegramClaudeBot:
             text = update.message.text.strip()
             chat_id = str(update.message.chat_id)
             message_id = str(update.message.message_id)
+
+            # Authorization check
+            if self.allowed_usernames is not None:
+                username = (update.message.from_user.username or "").lower()
+                if username not in self.allowed_usernames:
+                    await update.message.reply_text("⛔ You are not authorized to use this bot.")
+                    return
 
             if self.queue.has_running_task():
                 self.queue.enqueue({"message_id": message_id, "text": text, "chat_id": chat_id})
@@ -289,6 +301,11 @@ def load_config() -> dict:
     config["claude_code_project_path"] = os.environ.get("CLAUDE_CODE_PROJECT_PATH", config.get("claude_code_project_path", ""))
     config["poll_interval_seconds"] = int(os.environ.get("POLL_INTERVAL_SECONDS", config.get("poll_interval_seconds", 5)))
     config["task_timeout_minutes"] = int(os.environ.get("TASK_TIMEOUT_MINUTES", config.get("task_timeout_minutes", 30)))
+    raw_usernames = os.environ.get("ALLOWED_TELEGRAM_USERNAMES", config.get("allowed_telegram_usernames", ""))
+    if isinstance(raw_usernames, list):
+        config["allowed_telegram_usernames"] = [u.strip() for u in raw_usernames if u.strip()]
+    else:
+        config["allowed_telegram_usernames"] = [u.strip() for u in raw_usernames.split(",") if u.strip()]
 
     if not config["telegram_bot_token"]:
         print("TELEGRAM_BOT_TOKEN environment variable or config.yaml required", file=sys.stderr)
