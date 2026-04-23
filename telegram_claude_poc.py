@@ -337,6 +337,7 @@ class TelegramClaudeBot:
         self._offset: Optional[int] = None
         self._task_lock = asyncio.Lock()
         self._last_kaizen_check: Optional[datetime] = None
+        self._pending_kaizen_selection: Optional[str] = None  # chat_id của user đang chọn kaizen
 
     async def send_text(self, chat_id: str, text: str, reply_to: Optional[str] = None):
         try:
@@ -379,6 +380,10 @@ class TelegramClaudeBot:
             await update.message.reply_text("✅ No improvements needed right now. Code looks healthy!")
             return
 
+        # Store recommendations và chat_id để handle reply
+        self._pending_kaizen_selection = str(update.message.chat_id)
+        self._cached_recommendations = recommendations
+
         report = self.format_kaizen_report(recommendations)
         await update.message.reply_text(report)
 
@@ -407,15 +412,41 @@ class TelegramClaudeBot:
                     await update.message.reply_text("⛔ You are not authorized to use this bot.")
                     return
 
+            # Check if user is responding to kaizen selection (within 2 minutes)
+            if (self._pending_kaizen_selection == chat_id and
+                hasattr(self, '_cached_recommendations') and
+                self._cached_recommendations):
+                try:
+                    choice_idx = int(text) - 1
+                    if 0 <= choice_idx < len(self._cached_recommendations):
+                        selected = self._cached_recommendations[choice_idx]
+                        action = selected.get('action', '')
+                        # Clear pending state
+                        self._pending_kaizen_selection = None
+                        self._cached_recommendations = None
+                        # Execute the kaizen task via Claude Code
+                        self.queue.set_running({"message_id": message_id, "text": action, "chat_id": chat_id})
+                        await update.message.reply_text(f"🎯 Executing: {selected['title']}\n\n{action}")
+                        asyncio.create_task(self._execute_task(message_id, chat_id, action))
+                        return
+                except (ValueError, IndexError):
+                    # Not a valid number, fall through to normal task handling
+                    pass
+
             if self.queue.has_running_task():
                 self.queue.enqueue({"message_id": message_id, "text": text, "chat_id": chat_id})
                 await update.message.reply_text(f"Task queued (position: {len(self.queue.peek())})")
             else:
                 self.queue.set_running({"message_id": message_id, "text": text, "chat_id": chat_id})
                 await update.message.reply_text("Starting task...")
-                asyncio.create_task(self._execute_task(message_id, chat_id, text))
+                asyncio.create_task(self._execute_task(message_id, chat_id, text, is_kaizen=(self._pending_kaizen_selection is not None and self._pending_kaizen_selection == chat_id)))
 
-    async def _execute_task(self, message_id: str, chat_id: str, text: str):
+    async def _execute_task(self, message_id: str, chat_id: str, text: str, is_kaizen: bool = False):
+        async with self._task_lock:
+            stream_handler = StreamHandler()
+
+            # For kaizen tasks, run Claude Code on the bot's own directory to improve itself
+            run_path = SCRIPT_DIR if is_kaizen else self.project_path
         async with self._task_lock:
             stream_handler = StreamHandler()
 
@@ -439,7 +470,7 @@ class TelegramClaudeBot:
             def error_callback(line: str):
                 asyncio.create_task(self.send_text(chat_id, f"❌ {line}"))
 
-            claude = ClaudeSubprocess(self.project_path, self.timeout_minutes)
+            claude = ClaudeSubprocess(run_path, self.timeout_minutes)
             success = claude.run(text, output_callback, error_callback)
 
             remaining = stream_handler.flush()
