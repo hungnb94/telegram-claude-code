@@ -18,9 +18,9 @@ import yaml
 from telegram import Bot as TelegramBot, BotCommand, Update
 from telegram.error import TelegramError
 
-from poc_dev_flow_agent.task_queue import TaskQueue
-from poc_dev_flow_agent.claude_subprocess import ClaudeSubprocess
-from poc_dev_flow_agent.stream_handler import StreamHandler
+from telegram_claude_agent.task_queue import TaskQueue
+from telegram_claude_agent.claude_subprocess import ClaudeSubprocess
+from telegram_claude_agent.stream_handler import StreamHandler
 
 PACKAGE_DIR = Path(__file__).parent.parent.parent
 DATA_DIR = PACKAGE_DIR / "data"

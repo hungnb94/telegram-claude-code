@@ -1,5 +1,5 @@
 import pytest
-from poc_dev_flow_agent.stream_handler import StreamHandler
+from telegram_claude_agent.stream_handler import StreamHandler
 
 
 @pytest.mark.unit

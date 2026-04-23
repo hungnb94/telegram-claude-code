@@ -1,0 +1,12 @@
+pyproject.toml
+src/telegram_claude_agent/__init__.py
+src/telegram_claude_agent/bot.py
+src/telegram_claude_agent/claude_subprocess.py
+src/telegram_claude_agent/stream_handler.py
+src/telegram_claude_agent/task_queue.py
+src/telegram_claude_agent.egg-info/PKG-INFO
+src/telegram_claude_agent.egg-info/SOURCES.txt
+src/telegram_claude_agent.egg-info/dependency_links.txt
+src/telegram_claude_agent.egg-info/requires.txt
+src/telegram_claude_agent.egg-info/top_level.txt
+tests/test_bot.py

@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from poc_dev_flow_agent.bot import KaizenScanner, Bot
-from poc_dev_flow_agent.task_queue import TaskQueue
-from poc_dev_flow_agent.stream_handler import StreamHandler
+from telegram_claude_agent.bot import KaizenScanner, Bot
+from telegram_claude_agent.task_queue import TaskQueue
+from telegram_claude_agent.stream_handler import StreamHandler
 
 
 @pytest.mark.unit

@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: telegram-claude-agent
+Version: 1.0.0
+Summary: Telegram bot that runs Claude Code tasks locally and streams progress back
+Requires-Python: >=3.10
+Requires-Dist: python-telegram-bot>=20.0
+Requires-Dist: pyyaml>=6.0

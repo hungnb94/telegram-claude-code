@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-claude-agent"
+version = "1.0.0"
+description = "Telegram bot that runs Claude Code tasks locally and streams progress back"
+requires-python = ">=3.10"
+dependencies = [
+    "python-telegram-bot>=20.0",
+    "pyyaml>=6.0",
+]

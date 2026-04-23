@@ -5,8 +5,8 @@ from unittest.mock import patch, MagicMock, ANY
 
 import pytest
 
-from poc_dev_flow_agent.task_queue import TaskQueue
-from poc_dev_flow_agent.claude_subprocess import ClaudeSubprocess
+from telegram_claude_agent.task_queue import TaskQueue
+from telegram_claude_agent.claude_subprocess import ClaudeSubprocess
 
 
 @pytest.mark.integration

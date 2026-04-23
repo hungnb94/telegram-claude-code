@@ -1,4 +1,4 @@
-"""Add src/ to sys.path so tests can import poc_dev_flow_agent package."""
+"""Add src/ to sys.path so tests can import telegram_claude_agent package."""
 import sys
 from pathlib import Path
 

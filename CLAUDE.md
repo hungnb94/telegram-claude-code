@@ -12,15 +12,15 @@ Telegram bot that queues Claude Code tasks, executes them locally, streams progr
 # Setup
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -e .          # install in editable mode
 
 # Run the bot
-PYTHONPATH=src python -m poc_dev_flow_agent.bot
+python -m telegram_claude_agent.bot
 
 # Run tests
-PYTHONPATH=src pytest -m unit tests/           # unit tests only (90%)
-PYTHONPATH=src pytest -m integration tests/   # integration tests only (10%)
-PYTHONPATH=src pytest tests/                   # all tests
+pytest -m unit tests/           # unit tests only (fast)
+pytest -m integration tests/   # integration tests only (slow)
+pytest tests/                   # all tests
 ```
 
 ## TDD Workflow
@@ -34,8 +34,8 @@ Every task follows Test-Driven Development:
 ### Test Organization
 - `tests/` — Test suite root
   - `test_bot.py` — Core component tests (TaskQueue, StreamHandler, KaizenScanner, Bot)
-  - `unit/` — Fast, isolated unit tests (90%)
-  - `integration/` — Slower integration tests with mocked external systems (10%)
+  - `unit/` — Fast, isolated unit tests
+  - `integration/` — Slower integration tests with mocked external systems
 - All unit test classes must be marked with `@pytest.mark.unit`
 - All integration test classes must be marked with `@pytest.mark.integration`
 
@@ -121,31 +121,29 @@ review:
 ## Project Structure
 
 ```
-poc-dev-flow-agent/
-├── src/poc_dev_flow_agent/   # Source package
-│   ├── __init__.py           # Package init
-│   ├── bot.py                # Main entry: Bot, KaizenScanner, KiloCodeReviewer, load_config
-│   ├── task_queue.py         # Task queue with JSON persistence
-│   ├── claude_subprocess.py  # Claude Code subprocess wrapper
-│   └── stream_handler.py     # Output streaming handler
-├── data/                     # Runtime data (gitignored)
-│   ├── tasks.json            # Persisted task queue state
+claude-telegram-agent/
+├── src/telegram_claude_agent/  # Source package
+│   ├── __init__.py              # Package init
+│   ├── bot.py                   # Main entry: Bot, KaizenScanner, KiloCodeReviewer, load_config
+│   ├── task_queue.py            # Task queue with JSON persistence
+│   ├── claude_subprocess.py     # Claude Code subprocess wrapper
+│   └── stream_handler.py        # Output streaming handler
+├── data/                        # Runtime data (gitignored)
+│   ├── tasks.json               # Persisted task queue state
 │   └── kaizen_recommendations.json  # Kaizen scan results
-├── tests/                    # Test suite
-│   ├── conftest.py           # Shared pytest fixtures
-│   ├── test_bot.py           # Core component tests
-│   ├── unit/                 # Fast, isolated unit tests
-│   │   ├── __init__.py
+├── tests/                       # Test suite
+│   ├── conftest.py              # Shared pytest fixtures
+│   ├── test_bot.py              # Core component tests
+│   ├── unit/                    # Fast, isolated unit tests
 │   │   ├── test_stream_handler.py
 │   │   └── test_task_queue.py
-│   └── integration/          # Slower integration tests
-│       ├── __init__.py
+│   └── integration/             # Slower integration tests
 │       └── test_subprocess_flow.py
-├── docs/                     # Design documents
-│   └── kaizen-design.md      # Kaizen scanner architecture
-├── config.yaml.example       # Configuration template
+├── docs/                        # Design documents
+│   └── kaizen-design.md         # Kaizen scanner architecture
+├── config.yaml.example          # Configuration template
 ├── requirements.txt
-└── CLAUDE.md                 # This file
+└── CLAUDE.md                    # This file
 ```
 
 ## Architecture

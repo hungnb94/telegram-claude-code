@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from poc_dev_flow_agent.task_queue import TaskQueue
+from telegram_claude_agent.task_queue import TaskQueue
 
 
 @pytest.mark.unit

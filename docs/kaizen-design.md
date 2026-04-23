@@ -2,7 +2,7 @@
 
 ## Overview
 
-KaizenScanner analyzes task history and codebase to generate ranked improvement recommendations organized by category. Implemented as a class in `src/poc_dev_flow_agent/bot.py`.
+KaizenScanner analyzes task history and codebase to generate ranked improvement recommendations organized by category. Implemented as a class in `src/telegram_claude_agent/bot.py`.
 
 ## Categories
 
@@ -86,5 +86,5 @@ scan()
 
 ## Files
 
-- `KaizenScanner`, `KaizenConfig`, `SIGNAL_REGISTRY` — in `src/poc_dev_flow_agent/bot.py`
+- `KaizenScanner`, `KaizenConfig`, `SIGNAL_REGISTRY` — in `src/telegram_claude_agent/bot.py`
 - `kaizen_recommendations.json` — cached scan results in `data/` (gitignored)
