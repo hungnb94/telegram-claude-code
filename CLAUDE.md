@@ -18,7 +18,29 @@ pip install -r requirements.txt
 python telegram_claude_poc.py
 
 # Run tests
-pytest tests/
+pytest -m unit tests/           # unit tests only (90%)
+pytest -m integration tests/   # integration tests only (10%)
+pytest tests/                   # all tests
+```
+
+## TDD Workflow
+
+Every task follows Test-Driven Development:
+
+1. **Red** — Write a failing unit test in `tests/unit/test_*.py`
+2. **Green** — Write minimal code to make the test pass
+3. **Refactor** — Improve code structure without breaking tests
+
+### Test Organization
+- `tests/unit/` — Fast, isolated unit tests (90%)
+- `tests/integration/` — Slower integration tests with mocked external systems (10%)
+- All unit test classes must be marked with `@pytest.mark.unit`
+- All integration test classes must be marked with `@pytest.mark.integration`
+
+### Test Commands
+```bash
+pytest -m unit tests/           # unit only (fast)
+pytest -m integration tests/    # integration only (slow)
 ```
 
 ## Configuration

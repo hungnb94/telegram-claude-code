@@ -8,6 +8,7 @@ import pytest
 from telegram_claude_poc import KaizenScanner, TaskQueue, StreamHandler, TelegramClaudeBot
 
 
+@pytest.mark.unit
 class TestTaskQueue:
     def test_enqueue_returns_message_id(self, tmp_path):
         q = TaskQueue(tmp_path / "tasks.json")
@@ -56,6 +57,7 @@ class TestTaskQueue:
         assert q.has_running_task() is True
 
 
+@pytest.mark.unit
 class TestStreamHandler:
     def test_add_line_accumulates_buffer(self):
         h = StreamHandler(lines_per_chunk=3)
@@ -75,6 +77,7 @@ class TestStreamHandler:
         assert h.buffer == []
 
 
+@pytest.mark.unit
 class TestKaizenScanner:
     def test_analyze_empty_tasks_file(self, tmp_path):
         tasks_file = tmp_path / "tasks.json"
@@ -109,6 +112,7 @@ class TestKaizenScanner:
         assert scanner.should_rescan() is True
 
 
+@pytest.mark.unit
 class TestTelegramClaudeBot:
     def test_format_kaizen_card(self):
         rec = {"title": "Test", "description": "Desc", "priority": "high", "action": "Do it"}
