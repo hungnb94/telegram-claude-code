@@ -32,6 +32,8 @@ KILOCODE_REVIEW_TIMEOUT_SECONDS = 300
 REVIEW_MAX_RETRIES_DEFAULT = 3
 REVIEW_PASS_KEYWORDS = ["approved", "lgtm", "looks good", "no issues", "pass"]
 REVIEW_FAIL_KEYWORDS = ["issue", "problem", "warning", "error", "bug", "security"]
+REVIEW_RETRY_FEEDBACK_CHARS = 2000
+REVIEW_FINAL_OUTPUT_CHARS = 3000
 
 
 SIGNAL_REGISTRY: dict[str, callable] = {}
@@ -92,12 +94,16 @@ class KiloCodeReviewer:
         max_retries: int = REVIEW_MAX_RETRIES_DEFAULT,
         pass_keywords: list[str] = REVIEW_PASS_KEYWORDS,
         fail_keywords: list[str] = REVIEW_FAIL_KEYWORDS,
+        retry_feedback_chars: int = REVIEW_RETRY_FEEDBACK_CHARS,
+        final_output_chars: int = REVIEW_FINAL_OUTPUT_CHARS,
     ):
         self.project_path = project_path
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.pass_keywords = pass_keywords
         self.fail_keywords = fail_keywords
+        self.retry_feedback_chars = retry_feedback_chars
+        self.final_output_chars = final_output_chars
 
     def review(self, task_description: str) -> tuple[bool, str]:
         """Run KiloCode review on the completed task. Returns (passed, output)."""
@@ -504,6 +510,8 @@ class TelegramClaudeBot:
                 max_retries=review_config.get("max_retries", REVIEW_MAX_RETRIES_DEFAULT),
                 pass_keywords=review_config.get("pass_keywords", REVIEW_PASS_KEYWORDS),
                 fail_keywords=review_config.get("fail_keywords", REVIEW_FAIL_KEYWORDS),
+                retry_feedback_chars=review_config.get("retry_feedback_chars", REVIEW_RETRY_FEEDBACK_CHARS),
+                final_output_chars=review_config.get("final_output_chars", REVIEW_FINAL_OUTPUT_CHARS),
             )
         else:
             self.kilocode_reviewer = None
@@ -770,7 +778,7 @@ class TelegramClaudeBot:
                     break
 
                 # Retry Claude Code with review feedback
-                retry_msg = f"Fix issues from KiloCode review: {review_output}"
+                retry_msg = f"Fix issues from KiloCode review: {review_output[:self.kilocode_reviewer.retry_feedback_chars]}"
                 await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
                     f"⚠️ *Review failed - retrying with feedback...*\n\n📝 Issue: {review_output[:500]}")
 
@@ -784,9 +792,9 @@ class TelegramClaudeBot:
 
             # Final review result
             if last_review_passed:
-                final_text = f"✅ *Task completed & reviewed*\n\n📊 *KiloCode: PASSED*\n\n```\n{last_review_output[:1500]}\n```"
+                final_text = f"✅ *Task completed & reviewed*\n\n📊 *KiloCode: PASSED*\n\n```\n{last_review_output[:self.kilocode_reviewer.final_output_chars]}\n```"
             else:
-                final_text = f"⚠️ *Task completed*\n📊 *KiloCode: Max retries reached*\n\n```\n{last_review_output[:1500]}\n```"
+                final_text = f"⚠️ *Task completed*\n📊 *KiloCode: Max retries reached*\n\n```\n{last_review_output[:self.kilocode_reviewer.final_output_chars]}\n```"
 
             await self.edit_message(chat_id, self.streaming_message.get(message_id, ""), final_text)
             self.streaming_message.pop(message_id, None)
@@ -907,10 +915,13 @@ def load_config() -> dict:
         config["allowed_telegram_usernames"] = [u.strip() for u in raw_usernames.split(",") if u.strip()]
 
     # Review config (KiloCode post-task review)
+    review_cfg = config.get("review", {})
     config["review"] = {
         "enabled": os.environ.get("KILOCODE_REVIEW_ENABLED", "true").lower() == "true",
-        "max_retries": int(os.environ.get("KILOCODE_REVIEW_MAX_RETRIES", config.get("review", {}).get("max_retries", REVIEW_MAX_RETRIES_DEFAULT))),
-        "timeout_seconds": int(os.environ.get("KILOCODE_REVIEW_TIMEOUT", config.get("review", {}).get("timeout_seconds", KILOCODE_REVIEW_TIMEOUT_SECONDS))),
+        "max_retries": int(os.environ.get("KILOCODE_REVIEW_MAX_RETRIES", review_cfg.get("max_retries", REVIEW_MAX_RETRIES_DEFAULT))),
+        "timeout_seconds": int(os.environ.get("KILOCODE_REVIEW_TIMEOUT", review_cfg.get("timeout_seconds", KILOCODE_REVIEW_TIMEOUT_SECONDS))),
+        "retry_feedback_chars": int(os.environ.get("KILOCODE_REVIEW_RETRY_FEEDBACK_CHARS", review_cfg.get("retry_feedback_chars", REVIEW_RETRY_FEEDBACK_CHARS))),
+        "final_output_chars": int(os.environ.get("KILOCODE_REVIEW_FINAL_OUTPUT_CHARS", review_cfg.get("final_output_chars", REVIEW_FINAL_OUTPUT_CHARS))),
     }
 
     if not config["telegram_bot_token"]:

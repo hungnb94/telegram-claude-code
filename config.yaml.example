@@ -43,6 +43,8 @@ review:
   enabled: true
   max_retries: 3
   timeout_seconds: 300
+  retry_feedback_chars: 2000  # chars sent to Claude Code on retry
+  final_output_chars: 3000   # chars shown in final Telegram message
   pass_keywords:
     - approved
     - lgtm
