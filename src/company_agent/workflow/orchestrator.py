@@ -158,6 +158,7 @@ class WorkflowOrchestrator:
 
         for task in ordered_tasks:
             print(f"[ORCH DEBUG] Processing task {task.id[:8]}, type={task.type.value}, deps={task.deps}", flush=True)
+
             # Wait for dependencies
             deps_met = False
             while not deps_met:
@@ -167,6 +168,7 @@ class WorkflowOrchestrator:
                     deps_completed = all(
                         tid in task_results for tid in task_obj.deps
                     )
+                    print(f"[ORCH DEBUG]   Task {task.id[:8]} waiting deps: deps={task_obj.deps}, completed={ {tid: tid in task_results for tid in task_obj.deps} }", flush=True)
                     if deps_completed:
                         deps_met = True
                     elif any(
@@ -177,6 +179,9 @@ class WorkflowOrchestrator:
                         task.status = TaskStatus.SKIPPED
                         await self.task_queue.update_task(task)
                         break
+                else:
+                    print(f"[ORCH DEBUG]   Task {task.id[:8]} not found in queue!", flush=True)
+                    break
 
             if task.status == TaskStatus.SKIPPED:
                 continue
