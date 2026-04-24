@@ -117,8 +117,10 @@ class WorkflowOrchestrator:
         # Create tasks in queue
         for task in plan.tasks:
             task.workflow_id = workflow.id
+            print(f"[ORCH DEBUG] Creating task {task.id[:8]}, type={task.type.value}, agent={task.agent}", flush=True)
             await self.task_queue.create_task(task)
             workflow.tasks.append(task.id)
+            print(f"[ORCH DEBUG]   -> created with deps={task.deps}", flush=True)
 
         workflow = await self.task_queue.create_workflow(workflow)
         self._current_workflow = workflow
