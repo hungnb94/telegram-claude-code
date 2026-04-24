@@ -254,6 +254,11 @@ class EventTypes:
     APPROVAL_GRANTED = "approval.granted"
     APPROVAL_DENIED = "approval.denied"
 
+    # Clarification events (interactive mode)
+    CLARIFICATION_ASKED = "clarification.asked"
+    CLARIFICATION_ANSWERED = "clarification.answered"
+    CLARIFICATION_TIMEOUT = "clarification.timeout"
+
     # System events
     SYSTEM_ERROR = "system.error"
     SYSTEM_SHUTDOWN = "system.shutdown"

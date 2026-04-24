@@ -24,6 +24,7 @@ from company_agent.workflow.approve_gate import (
     extract_test_pass_rate,
 )
 from company_agent.workflow.planner import Planner, TaskPlan
+from company_agent.workflow.clarification import ClarificationManager, ClarificationRequested
 
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ class WorkflowOrchestrator:
         self.agent_registry = agent_registry
         self.planner = planner or Planner()
         self.approve_gate = approve_gate or ApproveGate()
+        self.clarification_manager = ClarificationManager(event_bus=event_bus)
 
         # Current workflow state
         self._current_workflow: Optional[Workflow] = None
@@ -103,8 +105,8 @@ class WorkflowOrchestrator:
             },
         ))
 
-        # Create plan
-        plan = await self.planner.create_plan(request, {
+        # Create plan (sync operation)
+        plan = self.planner.create_plan(request, {
             **context,
             "workflow_id": workflow.id,
         })
@@ -244,7 +246,7 @@ class WorkflowOrchestrator:
             ))
 
     async def _execute_task(self, task: Task) -> TaskResult:
-        """Execute a single task."""
+        """Execute a single task with clarification support."""
         # Publish task started event
         await self.event_bus.publish(Event(
             type=EventTypes.TASK_STARTED,
@@ -272,13 +274,85 @@ class WorkflowOrchestrator:
             await self._complete_task(task, error_result)
             return error_result
 
-        # Execute with streaming if supported
-        if adapter.supports_streaming() and self._stream_callback:
-            result = await adapter.execute_streaming(task, self._stream_callback)
-        else:
-            result = await adapter.execute(task)
+        # Execute with clarification support
+        try:
+            if adapter.supports_streaming() and self._stream_callback:
+                result = await adapter.execute_streaming(task, self._stream_callback)
+            else:
+                result = await adapter.execute(task)
+        except ClarificationRequested as e:
+            # Agent needs user input - pause and ask
+            result = await self._handle_clarification(task, e, adapter)
 
         await self._complete_task(task, result)
+        return result
+
+    async def _handle_clarification(
+        self,
+        task: Task,
+        e: ClarificationRequested,
+        adapter: AgentAdapter,
+    ) -> TaskResult:
+        """Handle a clarification request from an agent."""
+        # Create clarification record
+        clar = self.clarification_manager.create(
+            question=e.question,
+            options=e.options,
+            task_id=task.id,
+            asker=task.agent,
+            clarification_type=e.clarification_type,
+            default=e.default,
+            context=e.context,
+            timeout_seconds=e.timeout_seconds,
+        )
+
+        # Publish event so TelegramReporter can ask the user
+        await self.event_bus.publish(Event(
+            type=EventTypes.CLARIFICATION_ASKED,
+            source="orchestrator",
+            payload={
+                "clarification_id": clar.id,
+                "task_id": task.id,
+                "workflow_id": task.workflow_id,
+                "question": e.question,
+                "options": e.options,
+                "clarification_type": e.clarification_type.value,
+                "asker": task.agent,
+            },
+        ))
+
+        # Wait for user answer
+        answer = await self.clarification_manager.wait_for_answer(clar.id, timeout=e.timeout_seconds)
+
+        if answer is None:
+            # Timeout - use default if available
+            if e.default:
+                answer = e.default
+            else:
+                return TaskResult(
+                    success=False,
+                    error=f"Clarification timeout: {e.question}",
+                    metadata={"clarification_id": clar.id},
+                )
+
+        # Publish answer event
+        await self.event_bus.publish(Event(
+            type=EventTypes.CLARIFICATION_ANSWERED,
+            source="orchestrator",
+            payload={
+                "clarification_id": clar.id,
+                "answer": answer,
+            },
+        ))
+
+        # Resume task with the answer - store in task payload
+        task.payload["clarification_answer"] = answer
+        task.payload["clarification_id"] = clar.id
+        try:
+            result = await adapter.execute(task)
+        except Exception as ex:
+            return TaskResult(success=False, error=str(ex))
+
         return result
 
     async def _complete_task(self, task: Task, result: TaskResult):
