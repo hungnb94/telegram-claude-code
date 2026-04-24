@@ -103,32 +103,32 @@ class ClaudeAdapter(AgentAdapter):
         """
         prompt_lower = prompt.lower()
 
-        # Ambiguous patterns
+        # ===== Specific technical ambiguity patterns =====
         ambiguous_patterns = {
             "which_database": {
-                "keywords": ["which database", "what database", "database or", "postgresql or", "sqlite or"],
+                "keywords": ["which database", "what database", "database or", "postgresql or", "sqlite or", "mysql or", "mongodb or"],
                 "question": "Which database should I use?",
-                "options": ["PostgreSQL", "SQLite", "MongoDB", "Let me decide later"],
+                "options": ["PostgreSQL", "SQLite", "MongoDB", "MySQL", "Let me decide later"],
             },
             "which_framework": {
-                "keywords": ["which framework", "what framework", "framework or", "react or", "vue or"],
+                "keywords": ["which framework", "what framework", "framework or", "react or", "vue or", "angular or", "svelte or"],
                 "question": "Which framework do you prefer?",
-                "options": ["React", "Vue.js", "Angular", "Let me decide later"],
+                "options": ["React", "Vue.js", "Angular", "Svelte", "Let me decide later"],
             },
             "api_style": {
-                "keywords": ["rest api", "graphql api", "api design", "rest or graphql"],
+                "keywords": ["rest api", "graphql api", "api design", "rest or graphql", "grpc or"],
                 "question": "Which API style should I use?",
                 "options": ["REST", "GraphQL", "gRPC", "Let me decide later"],
             },
             "architecture": {
-                "keywords": ["microservices", "monolith", "serverless", "monolithic or"],
+                "keywords": ["microservices", "monolith", "serverless", "monolithic or", "docker or"],
                 "question": "Which architecture style?",
                 "options": ["Monolith", "Microservices", "Serverless", "Let me decide later"],
             },
             "auth_strategy": {
-                "keywords": ["jwt or", "session or", "oauth or", "auth strategy", "authentication approach"],
+                "keywords": ["jwt or", "session or", "oauth or", "auth strategy", "authentication approach", "bearer token or"],
                 "question": "Which authentication strategy?",
-                "options": ["JWT", "Session-based", "OAuth 2.0", "Let me decide later"],
+                "options": ["JWT", "Session-based", "OAuth 2.0", "API Keys", "Let me decide later"],
             },
         }
 
@@ -138,8 +138,36 @@ class ClaudeAdapter(AgentAdapter):
                     question=pattern["question"],
                     options=pattern["options"],
                     clarification_type=ClarificationType.CHOICE,
-                    context=context,  # Pass through chat_id and other context
+                    context=context,
                 )
+
+        # ===== General vagueness detection =====
+        vague_indicators = [
+            # Generic requests without specifics
+            "build a feature", "build new feature", "tao mot tinh nang", "build một tính năng",
+            "create something", "make something", "do something",
+            "add a feature", "add something", "thêm tính năng",
+            "implement something", "xây dựng một",
+            "create a new", "build a new",
+            # Missing technical context
+            "fix the bug", "fix bug", "sửa lỗi",  # Which file?
+            "improve performance", "tối ưu",        # What specifically?
+            "update the api", "cập nhật api",       # Which endpoints?
+        ]
+
+        if any(indicator in prompt_lower for indicator in vague_indicators):
+            raise ClarificationRequested(
+                question="I need more details to help you. What specifically do you want to build?",
+                options=[
+                    "A web API (REST/GraphQL)",
+                    "A mobile app",
+                    "A CLI tool",
+                    "A web dashboard/frontend",
+                    "Describe the full requirement",
+                ],
+                clarification_type=ClarificationType.CHOICE,
+                context=context,
+            )
 
     async def execute(self, task: Task) -> TaskResult:
         """Execute a code task using Claude CLI.

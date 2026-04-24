@@ -32,7 +32,7 @@ class TestClarificationDetection:
                 {"chat_id": "123"}
             )
         assert exc_info.value.question == "Which database should I use?"
-        assert exc_info.value.options == ["PostgreSQL", "SQLite", "MongoDB", "Let me decide later"]
+        assert exc_info.value.options == ["PostgreSQL", "SQLite", "MongoDB", "MySQL", "Let me decide later"]
         assert exc_info.value.clarification_type == ClarificationType.CHOICE
         assert exc_info.value.context == {"chat_id": "123"}
 
@@ -60,9 +60,9 @@ class TestClarificationDetection:
     @pytest.mark.unit
     def test_no_clarification_needed(self, adapter):
         """Should NOT raise when prompt is unambiguous."""
-        # Should not raise
+        # Should not raise - this is a specific, clear request
         adapter._detect_clarification(
-            "fix the bug in user authentication",
+            "add user login endpoint to Fastify app",
             {"chat_id": "789"}
         )
 
