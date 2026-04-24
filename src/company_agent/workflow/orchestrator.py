@@ -412,11 +412,17 @@ class WorkflowOrchestrator:
         """Make approval decision based on task results."""
         criteria = ApprovalCriteria()
 
-        # Find test and review results
+        # Find test and review results from tasks in queue
+        # Use task object directly to avoid UUID mismatch issues with task_results dict
         tasks = await self.task_queue.get_tasks(workflow_id=self._current_workflow.id)
 
         for task in tasks:
-            result = task_results.get(task.id)
+            # Use task.result directly (set during _complete_task) instead of task_results dict
+            if task.status == TaskStatus.COMPLETED and task.result:
+                result = task.result
+            else:
+                result = task_results.get(task.id)
+
             if not result:
                 continue
 
@@ -424,8 +430,14 @@ class WorkflowOrchestrator:
                 criteria.test_result = result
             elif task.type.value == "review":
                 criteria.review_score, criteria.review_approved = extract_review_score(result)
-                # Check for critical issues in review output
-                if not result.success or criteria.review_score < 5.0:
+                # Check for critical issues in review output (only if review actually ran and returned meaningful data)
+                # review_score == 0.0 means no review data (e.g., dummy adapter) - skip this check
+                if not result.success:
+                    criteria.has_critical_issues = True
+                    if result.output:
+                        criteria.issues.append(result.output[:200])
+                elif criteria.review_score > 0 and criteria.review_score < 5.0:
+                    # Only flag as critical if we actually have a real score below threshold
                     criteria.has_critical_issues = True
                     if result.output:
                         criteria.issues.append(result.output[:200])

@@ -533,13 +533,24 @@ class Bot:
         self._clarification_manager = ClarificationManager(event_bus=self._event_bus)
 
         # Initialize AgentRegistry and WorkflowOrchestrator for task execution
-        from company_agent.agents import AgentRegistry, ClaudeAdapter
+        from company_agent.agents import AgentRegistry, ClaudeAdapter, PytestAdapter, KiloCodeAdapter
         self._agent_registry = AgentRegistry()
         self._claude_adapter = ClaudeAdapter(
             project_path=self.project_path,
             timeout_seconds=self.timeout_minutes * 60,
         )
         self._agent_registry.register(self._claude_adapter)
+
+        # Register Pytest and KiloCode adapters for the full pipeline
+        self._pytest_adapter = PytestAdapter(
+            project_path=self.project_path,
+        )
+        self._agent_registry.register(self._pytest_adapter)
+
+        self._kilocode_adapter = KiloCodeAdapter(
+            project_path=self.project_path,
+        )
+        self._agent_registry.register(self._kilocode_adapter)
 
         from company_agent.workflow.orchestrator import WorkflowOrchestrator
         self._orchestrator = WorkflowOrchestrator(
