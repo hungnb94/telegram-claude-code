@@ -524,6 +524,31 @@ class Bot:
         self._pending_clarification_id: Optional[str] = None  # clarification_id đang chờ
         self._pending_clarification_options: Optional[list] = None  # options nếu có
 
+        # Initialize ClarificationManager for interactive mode
+        from company_agent.event_bus import EventBus
+        from company_agent.workflow.clarification import ClarificationManager
+        self._event_bus = EventBus()
+        self._clarification_manager = ClarificationManager(event_bus=self._event_bus)
+
+        # Initialize AgentRegistry and WorkflowOrchestrator for task execution
+        from company_agent.agents import AgentRegistry, ClaudeAdapter
+        self._agent_registry = AgentRegistry()
+        self._claude_adapter = ClaudeAdapter(
+            project_path=self.project_path,
+            timeout_seconds=self.timeout_minutes * 60,
+        )
+        self._agent_registry.register(self._claude_adapter)
+
+        from company_agent.workflow.orchestrator import WorkflowOrchestrator
+        self._orchestrator = WorkflowOrchestrator(
+            task_queue=self.queue,
+            event_bus=self._event_bus,
+            agent_registry=self._agent_registry,
+        )
+        # Stream callback context - set during _execute_task
+        self._stream_chat_id: Optional[str] = None
+        self._stream_message_id: Optional[str] = None
+
         # Recover: clear stale running state from previous session
         if self.queue.has_running_task():
             data = self.queue._load()
@@ -741,48 +766,68 @@ class Bot:
             self._process_next()
             return
 
-        # Phase 2: Running - update status
-        await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
-            "📋 *Starting task...*\n⏳ *Running...*")
+        # Set up orchestrator stream callback for Telegram updates
+        self._stream_chat_id = chat_id
+        self._stream_message_id = message_id
 
-        async def edit_output():
-            chunks = "\n".join(stream_handler.buffer)
-            if chunks:
-                task = self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
-                    f"📋 *Starting task...*\n⏳ *Running...*\n\n```\n{chunks}\n```")
-                pending_edit_tasks.append(task)
-                return task
-            return None
-
-        async def send_error(line: str):
-            task = self.send_text(chat_id, f"❌ {line}")
-            pending_edit_tasks.append(task)
-            return task
-
-        claude = ClaudeSubprocess(run_path, self.timeout_minutes)
-
-        def output_callback(line: str):
+        async def stream_to_telegram(line: str):
+            """Stream callback to send output to Telegram."""
             chunks = stream_handler.add_line(line)
             if chunks:
-                loop = asyncio.get_event_loop()
-                loop.call_soon_threadsafe(lambda: asyncio.create_task(edit_output()))
+                task = self.edit_message(
+                    chat_id,
+                    self.streaming_message.get(message_id, ""),
+                    f"📋 *Running...*\n\n```\n" + "\n".join(chunks) + "\n```"
+                )
+                pending_edit_tasks.append(task)
 
-        def error_callback(line: str):
-            loop = asyncio.get_event_loop()
-            loop.call_soon_threadsafe(lambda: asyncio.create_task(send_error(line)))
+        self._orchestrator.set_stream_callback(stream_to_telegram)
 
-        success = claude.run(text, output_callback, error_callback)
+        try:
+            # Phase 2: Running via WorkflowOrchestrator
+            await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
+                "📋 *Starting task...*\n⏳ *Running...*")
 
+            # Execute via orchestrator (handles clarification automatically)
+            workflow = await self._orchestrator.create_and_execute(
+                request=text,
+                context={
+                    "message_id": message_id,
+                    "chat_id": chat_id,
+                    "project_path": self.project_path,
+                }
+            )
+
+            # Get task output from workflow result
+            success = workflow.result.success if workflow.result else False
+            final_output = ""
+            if workflow.result and workflow.result.output:
+                # Process output through stream_handler for consistency
+                for line in workflow.result.output.splitlines():
+                    stream_handler.add_line(line)
+                final_output = "\n".join(stream_handler.buffer)
+
+        except Exception as e:
+            print(f"Workflow execution error: {e}", file=sys.stderr)
+            success = False
+            final_output = f"Error: {e}"
+
+        # Flush any remaining stream output
         remaining = stream_handler.flush()
         if remaining:
             await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
-                f"📋 *Starting task...*\n⏳ *Running...*\n\n```\n" + "\n".join(remaining) + "\n```")
+                f"📋 *Running...*\n\n```\n" + "\n".join(remaining) + "\n```")
 
         # Wait for all scheduled edit tasks to complete
         if pending_edit_tasks:
             await asyncio.gather(*pending_edit_tasks, return_exceptions=True)
 
         self.queue.complete(message_id, success)
+
+        # Clear stream context
+        self._orchestrator.set_stream_callback(None)
+        self._stream_chat_id = None
+        self._stream_message_id = None
 
         # Phase 3: KiloCode review loop (retry if failed)
         if success and self.kilocode_reviewer:
@@ -816,8 +861,30 @@ class Bot:
                 await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
                     f"⚠️ *Review failed - retrying with full feedback...*")
 
-                claude_retry = ClaudeSubprocess(run_path, self.timeout_minutes)
-                retry_success = claude_retry.run(retry_msg, output_callback, error_callback)
+                # Use orchestrator for retry with review feedback
+                retry_stream_handler = StreamHandler(CHUNK_SIZE)
+                async def retry_stream_callback(line: str):
+                    chunks = retry_stream_handler.add_line(line)
+                    if chunks:
+                        task = self.edit_message(
+                            chat_id,
+                            self.streaming_message.get(message_id, ""),
+                            f"📋 *Retry...*\n\n```\n" + "\n".join(chunks) + "\n```"
+                        )
+                        pending_edit_tasks.append(task)
+
+                self._orchestrator.set_stream_callback(retry_stream_callback)
+                retry_workflow = await self._orchestrator.create_and_execute(
+                    request=retry_msg,
+                    context={
+                        "message_id": message_id,
+                        "chat_id": chat_id,
+                        "project_path": self.project_path,
+                        "is_retry": True,
+                    }
+                )
+                retry_success = retry_workflow.result.success if retry_workflow.result else False
+                self._orchestrator.set_stream_callback(None)
 
                 if not retry_success:
                     await self.edit_message(chat_id, self.streaming_message.get(message_id, ""),
@@ -843,7 +910,6 @@ class Bot:
             return
 
         # Phase 4: Final status (if no review)
-        final_output = "\n".join(stream_handler.buffer) if stream_handler.buffer else ""
         if final_output:
             final_text = f"✅ *Task completed*\n\n```\n{final_output}\n```"
         elif not success:
