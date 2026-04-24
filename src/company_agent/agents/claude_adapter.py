@@ -15,6 +15,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from company_agent.agents.base import AgentAdapter, Skill, TaskResult
 from company_agent.task_queue import Task
+from company_agent.workflow.clarification import ClarificationRequested, ClarificationType
 
 
 class ClaudeAdapter(AgentAdapter):
@@ -94,13 +95,59 @@ class ClaudeAdapter(AgentAdapter):
         except Exception:
             return False
 
+    def _detect_clarification(self, prompt: str, context: Dict[str, Any]) -> None:
+        """Detect ambiguous scenarios that need user clarification.
+
+        Raises ClarificationRequested if the prompt has ambiguity indicators.
+        The context (including chat_id) is passed through to the exception.
+        """
+        prompt_lower = prompt.lower()
+
+        # Ambiguous patterns
+        ambiguous_patterns = {
+            "which_database": {
+                "keywords": ["which database", "what database", "database or", "postgresql or", "sqlite or"],
+                "question": "Which database should I use?",
+                "options": ["PostgreSQL", "SQLite", "MongoDB", "Let me decide later"],
+            },
+            "which_framework": {
+                "keywords": ["which framework", "what framework", "framework or", "react or", "vue or"],
+                "question": "Which framework do you prefer?",
+                "options": ["React", "Vue.js", "Angular", "Let me decide later"],
+            },
+            "api_style": {
+                "keywords": ["rest api", "graphql api", "api design", "rest or graphql"],
+                "question": "Which API style should I use?",
+                "options": ["REST", "GraphQL", "gRPC", "Let me decide later"],
+            },
+            "architecture": {
+                "keywords": ["microservices", "monolith", "serverless", "monolithic or"],
+                "question": "Which architecture style?",
+                "options": ["Monolith", "Microservices", "Serverless", "Let me decide later"],
+            },
+            "auth_strategy": {
+                "keywords": ["jwt or", "session or", "oauth or", "auth strategy", "authentication approach"],
+                "question": "Which authentication strategy?",
+                "options": ["JWT", "Session-based", "OAuth 2.0", "Let me decide later"],
+            },
+        }
+
+        for pattern_id, pattern in ambiguous_patterns.items():
+            if any(kw in prompt_lower for kw in pattern["keywords"]):
+                raise ClarificationRequested(
+                    question=pattern["question"],
+                    options=pattern["options"],
+                    clarification_type=ClarificationType.CHOICE,
+                    context=context,  # Pass through chat_id and other context
+                )
+
     async def execute(self, task: Task) -> TaskResult:
         """Execute a code task using Claude CLI.
 
         Payload:
             prompt: str - the instruction for Claude
             files: list[str] - files to work with (optional)
-            context: dict - additional context
+            context: dict - additional context (includes chat_id for clarification)
         """
         import time
         start = time.time()
@@ -111,6 +158,9 @@ class ClaudeAdapter(AgentAdapter):
 
         if not prompt:
             return TaskResult(success=False, error="No prompt provided")
+
+        # Check for ambiguous scenarios that need user input
+        self._detect_clarification(prompt, context)
 
         cmd = self._build_command(prompt, files)
 
@@ -181,6 +231,9 @@ class ClaudeAdapter(AgentAdapter):
 
         if not prompt:
             return TaskResult(success=False, error="No prompt provided")
+
+        # Check for ambiguous scenarios that need user input
+        self._detect_clarification(prompt, context)
 
         cmd = self._build_command(prompt, files)
 

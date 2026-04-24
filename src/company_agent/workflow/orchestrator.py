@@ -331,6 +331,8 @@ class WorkflowOrchestrator:
         )
 
         # Publish event so TelegramReporter can ask the user
+        # chat_id comes from e.context (passed by bot.py when creating the task)
+        chat_id = e.context.get("chat_id") if e.context else None
         await self.event_bus.publish(Event(
             type=EventTypes.CLARIFICATION_ASKED,
             source="orchestrator",
@@ -342,6 +344,7 @@ class WorkflowOrchestrator:
                 "options": e.options,
                 "clarification_type": e.clarification_type.value,
                 "asker": task.agent,
+                "chat_id": chat_id,
             },
         ))
 
