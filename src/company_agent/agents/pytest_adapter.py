@@ -192,11 +192,11 @@ class PytestAdapter(AgentAdapter):
                     if callback:
                         await callback(text)
 
-                    if process.poll() is not None:
+                    if process.returncode is not None:
                         break
 
                 except asyncio.TimeoutError:
-                    if process.poll() is not None:
+                    if process.returncode is not None:
                         break
 
             os.close(master_fd)
