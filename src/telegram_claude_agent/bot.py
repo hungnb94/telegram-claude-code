@@ -495,7 +495,9 @@ class Bot:
 
         tasks_file = DATA_DIR / "tasks.json"
         kaizen_file = DATA_DIR / "kaizen_recommendations.json"
-        self.queue = TaskQueue(tasks_file)
+        from company_agent.task_queue import TaskQueue as WorkflowTaskQueue
+        self.queue = TaskQueue(tasks_file)  # Legacy: sync, for Telegram message queueing
+        self._workflow_queue = WorkflowTaskQueue(tasks_file.parent / "company_tasks.json")  # Async: for Orchestrator
         self.kaizen = KaizenScanner(self.project_path, tasks_file, kaizen_file, config.get("kaizen"))
 
         review_config = config.get("review", {})
@@ -541,9 +543,10 @@ class Bot:
 
         from company_agent.workflow.orchestrator import WorkflowOrchestrator
         self._orchestrator = WorkflowOrchestrator(
-            task_queue=self.queue,
+            task_queue=self._workflow_queue,
             event_bus=self._event_bus,
             agent_registry=self._agent_registry,
+            clarification_manager=self._clarification_manager,  # Share with Bot
         )
         # Stream callback context - set during _execute_task
         self._stream_chat_id: Optional[str] = None

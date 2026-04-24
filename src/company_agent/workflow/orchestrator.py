@@ -49,13 +49,14 @@ class WorkflowOrchestrator:
         agent_registry: AgentRegistry,
         planner: Optional[Planner] = None,
         approve_gate: Optional[ApproveGate] = None,
+        clarification_manager: Optional[ClarificationManager] = None,
     ):
         self.task_queue = task_queue
         self.event_bus = event_bus
         self.agent_registry = agent_registry
         self.planner = planner or Planner()
         self.approve_gate = approve_gate or ApproveGate()
-        self.clarification_manager = ClarificationManager(event_bus=event_bus)
+        self.clarification_manager = clarification_manager or ClarificationManager(event_bus=event_bus)
 
         # Current workflow state
         self._current_workflow: Optional[Workflow] = None

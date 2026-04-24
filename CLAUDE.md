@@ -16,6 +16,7 @@ pip install -e .          # install in editable mode
 
 # Run the bot
 python -m telegram_claude_agent.bot
+PYTHONPATH=src python src/telegram_claude_agent/bot.py
 
 # Run tests
 pytest -m unit tests/           # unit tests only (fast)
