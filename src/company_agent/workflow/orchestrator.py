@@ -112,6 +112,8 @@ class WorkflowOrchestrator:
             "workflow_id": workflow.id,
         })
 
+        print(f"[ORCH DEBUG] Plan created: {len(plan.tasks)} tasks, first task type={plan.tasks[0].type if plan.tasks else 'none'}", flush=True)
+
         # Create tasks in queue
         for task in plan.tasks:
             task.workflow_id = workflow.id
@@ -149,11 +151,13 @@ class WorkflowOrchestrator:
 
         # Get tasks in topological order
         ordered_tasks = plan.topological_order()
+        print(f"[ORCH DEBUG] Ordered tasks: {[t.id[:8] for t in ordered_tasks]}, types: {[t.type.value for t in ordered_tasks]}", flush=True)
 
         # Track task results for review task
         task_results: Dict[str, TaskResult] = {}
 
         for task in ordered_tasks:
+            print(f"[ORCH DEBUG] Processing task {task.id[:8]}, type={task.type.value}, deps={task.deps}", flush=True)
             # Wait for dependencies
             deps_met = False
             while not deps_met:
@@ -198,6 +202,13 @@ class WorkflowOrchestrator:
                     # Continue with other tasks but mark this failed
                     workflow.status = TaskStatus.FAILED
 
+        # Aggregate outputs from all tasks
+        all_outputs = []
+        for tid, result in task_results.items():
+            task = next((t for t in ordered_tasks if t.id == tid), None)
+            if task and result.output:
+                all_outputs.append(f"[{task.type.value.upper()}] {result.output[:500]}")
+
         # Determine approval decision
         decision = await self._make_approval_decision(task_results)
 
@@ -211,7 +222,10 @@ class WorkflowOrchestrator:
                 workflow.status = TaskStatus.FAILED
 
         workflow.completed_at = datetime.utcnow().timestamp()
-        workflow.result = TaskResult(success=workflow.status == TaskStatus.COMPLETED)
+        workflow.result = TaskResult(
+            success=workflow.status == TaskStatus.COMPLETED,
+            output="\n\n".join(all_outputs) if all_outputs else None,
+        )
         await self.task_queue.update_workflow(workflow)
 
         # Publish completion event
@@ -277,10 +291,12 @@ class WorkflowOrchestrator:
 
         # Execute with clarification support
         try:
+            print(f"[ORCH DEBUG] Executing task {task.id} with agent={task.agent}, type={task.type}", flush=True)
             if adapter.supports_streaming() and self._stream_callback:
                 result = await adapter.execute_streaming(task, self._stream_callback)
             else:
                 result = await adapter.execute(task)
+            print(f"[ORCH DEBUG] Task {task.id} result: success={result.success}, output_len={len(result.output) if result.output else 0}, error={result.error}", flush=True)
         except ClarificationRequested as e:
             # Agent needs user input - pause and ask
             result = await self._handle_clarification(task, e, adapter)

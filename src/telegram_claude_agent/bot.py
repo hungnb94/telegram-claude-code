@@ -801,6 +801,9 @@ class Bot:
                 }
             )
 
+            # Log workflow result for debugging
+            print(f"[DEBUG] Workflow completed: id={workflow.id}, status={workflow.status}, result={workflow.result}", file=sys.stderr)
+
             # Get task output from workflow result
             success = workflow.result.success if workflow.result else False
             final_output = ""
@@ -809,9 +812,13 @@ class Bot:
                 for line in workflow.result.output.splitlines():
                     stream_handler.add_line(line)
                 final_output = "\n".join(stream_handler.buffer)
+            else:
+                print(f"[DEBUG] No output from workflow. result={workflow.result}, success={success}", file=sys.stderr)
 
         except Exception as e:
+            import traceback
             print(f"Workflow execution error: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             success = False
             final_output = f"Error: {e}"
 
