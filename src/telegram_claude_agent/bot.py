@@ -519,6 +519,11 @@ class Bot:
         self._pending_kaizen_selection: Optional[str] = None  # chat_id của user đang chọn kaizen
         self._cached_recommendations: Optional[list[dict]] = None
 
+        # Interactive mode: pending clarification questions
+        self._pending_clarification: Optional[str] = None  # chat_id đang chờ clarification reply
+        self._pending_clarification_id: Optional[str] = None  # clarification_id đang chờ
+        self._pending_clarification_options: Optional[list] = None  # options nếu có
+
         # Recover: clear stale running state from previous session
         if self.queue.has_running_task():
             data = self.queue._load()
@@ -663,6 +668,41 @@ class Bot:
                 except (ValueError, IndexError):
                     # Not a valid number, fall through to normal task handling
                     pass
+
+            # Check if user is responding to a clarification question (interactive mode)
+            if (self._pending_clarification == chat_id and
+                self._pending_clarification_id is not None and
+                hasattr(self, '_clarification_manager') and
+                self._clarification_manager is not None):
+                # Route answer to clarification manager
+                options = self._pending_clarification_options
+                if options:
+                    # Number selection
+                    try:
+                        idx = int(text.strip()) - 1
+                        if 0 <= idx < len(options):
+                            answer = options[idx]
+                        else:
+                            answer = text.strip()
+                    except ValueError:
+                        answer = text.strip()
+                else:
+                    answer = text.strip()
+
+                await self._clarification_manager.answer(
+                    self._pending_clarification_id,
+                    answer,
+                    f"telegram:{chat_id}"
+                )
+                self._pending_clarification = None
+                self._pending_clarification_id = None
+                self._pending_clarification_options = None
+                await self.bot.send_message(
+                    text=f"✅ Answer received: *{answer}*\n\nProcessing...",
+                    chat_id=chat_id,
+                    reply_to_message_id=int(message_id),
+                )
+                return
 
             if self.queue.has_running_task():
                 self.queue.enqueue({"message_id": message_id, "text": text, "chat_id": chat_id})
